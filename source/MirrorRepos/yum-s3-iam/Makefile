@@ -4,6 +4,7 @@ RELEASE = 1
 ARCH    = noarch
 
 RPM_TOPDIR ?= $(shell rpm --eval '%{_topdir}')
+$(info RPM_TOPDIR=${RPM_TOPDIR})
 
 RPMBUILD_ARGS := \
 	--define "name $(NAME)" \

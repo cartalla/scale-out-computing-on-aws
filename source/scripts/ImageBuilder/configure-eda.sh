@@ -169,4 +169,7 @@ if [ ! -e /usr/lib64/libncurses.so ]; then
     ln -s /usr/lib64/libncurses.so.5 /usr/lib64/libncurses.so
 fi
 
+mkdir -p /root/sem
+touch /root/sem/eda-packages-installed
+
 echo Passed

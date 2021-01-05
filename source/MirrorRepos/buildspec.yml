@@ -14,6 +14,10 @@ env:
 phases:
   install:
     commands:
+      - export repo_dir=$(date +%Y-%m-%d-%H-%M-%S)
+      - 'echo repo_dir=${repo_dir}'
+      - mkdir -p $repo_dir
+
       - yum -y install yum-utils createrepo groff which
       - curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
       - python get-pip.py
@@ -24,14 +28,18 @@ phases:
       - ls /etc/pki/rpm-gpg
       - rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7
       - rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7
+
       - # Copy config and source it
-      - aws s3 cp s3://${S3_INSTALL_BUCKET}/${S3_INSTALL_FOLDER}/scripts/config.cfg config.cfg
+      - aws s3 cp s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/scripts/config.cfg config.cfg
       - source config.cfg
+
       - yum -y install wget
       - yum -y install make createrepo rpm-build
       - pip install mock
+
       - # Install fsx lustre client
       - curl https://fsx-lustre-client-repo-public-keys.s3.amazonaws.com/fsx-rpm-public-key.asc -o /tmp/fsx-rpm-public-key.asc
+      - aws s3 cp /tmp/fsx-rpm-public-key.asc s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/yum/aws-fsx/fsx-rpm-public-key.asc
       - rpm --import /tmp/fsx-rpm-public-key.asc
       - curl https://fsx-lustre-client-repo.s3.amazonaws.com/el/7/fsx-lustre-client.repo -o /etc/yum.repos.d/aws-fsx.repo
       - #yum install -y kmod-lustre-client lustre-client
@@ -39,16 +47,36 @@ phases:
       - yum --disablerepo="*" --enablerepo="aws-fsx-src" list available
       - #yumdownloader --source kmod-lustre-client
 
+      - source config.cfg
+      - # Copy PBSPRO tarball
+      - wget -q $OPENPBS_URL
+      - aws s3 cp $OPENPBS_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/pbspro/$PBSPRO_TGZ
+      - # Copy Python tarball
+      - wget -q $PYTHON_URL
+      - aws s3 cp $PYTHON_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/python/$PYTHON_TGZ
+      - # Copy OpenMPI tarball
+      - wget -q $OPENMPI_URL
+      - aws s3 cp $OPENMPI_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/openmpi/$OPENMPI_TGZ
+      - # Copy Metric Beat tarball
+      - wget -q $METRICBEAT_URL
+      - aws s3 cp $METRICBEAST_RPM s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/metricbeat/$METRICBEAST_RPM
+
+      - aws s3 cp --recursive s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/MirrorRepos/yum-s3-iam s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/yum-s3-iam
+      - aws s3 cp --recursive s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/MirrorRepos/yum-s3-iam yum-s3-iam
+      - cd yum-s3-iam
+      - make test
+      - aws s3 cp /root/rpmbuild/RPMS/noarch/yum-plugin-s3-iam-1.2.2-1.noarch.rpm s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/yum/yum-plugin-s3-iam-1.2.2-1.noarch.rpm
+      - cd ..
+
     finally:
       - echo "Install phase complete"
       - ls /etc/pki/rpm-gpg
+
+      # Sync the intermediate results
+      - aws s3 sync --quiet $repo_dir s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/$repo_dir
     
   pre_build:
     commands:
-      - export repo_dir=$(date +%Y-%m-%d-%H-%M-%S)
-      - 'echo repo_dir=${repo_dir}'
-      - mkdir -p $repo_dir
-
       - 'echo "pwd: $(pwd)"'
       - 'echo "mounts:"'
       - df -h
@@ -64,36 +92,36 @@ phases:
       - 'echo repo_dir=${repo_dir}'
 
   build:
-    commands:
-      - echo "Running build phase"
-      - source config.cfg
-      - # Copy PBSPRO tarball
-      - wget -q $OPENPBS_URL
-      - aws s3 cp $OPENPBS_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/pbspro/$PBSPRO_TGZ
-      - # Copy Python tarball
-      - wget -q $PYTHON_URL
-      - aws s3 cp $PYTHON_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/python/$PYTHON_TGZ
-      - # Copy OpenMPI tarball
-      - wget -q $OPENMPI_URL
-      - aws s3 cp $OPENMPI_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/openmpi/$OPENMPI_TGZ
-      - # Copy Metric Beat tarball
-      - wget -q $METRICBEAT_URL
-      - aws s3 cp $METRICBEAST_RPM s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/metricbeat/$METRICBEAST_RPM
+    commands: |
+      echo "Running build phase"
 
-      - aws s3 cp --recursive s3://${S3_INSTALL_BUCKET}/${S3_INSTALL_FOLDER}/MirrorRepos/yum-s3-iam yum-s3-iam
-      - cd yum-s3-iam
-      - make test
-      - aws s3 cp /root/rpmbuild/RPMS/noarch/yum-plugin-s3-iam-1.2.2-1.noarch.rpm s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/yum/yum-plugin-s3-iam-1.2.2-1.noarch.rpm
-      - cd ..
-
-      - mkdir -p $repo_dir/yum/centos7
-      - reposync --quiet -g -l -p $repo_dir/yum/centos7 -r base
-      - reposync --quiet -g -l -p $repo_dir/yum/centos7 -r epel
-      - reposync --quiet -g -l -p $repo_dir/yum/centos7 -r extras
-      - reposync --quiet -g -l -p $repo_dir/yum/centos7 -r updates
-      - reposync --quiet -g -l -p $repo_dir/yum/centos7 -r aws-fsx
-      - reposync --quiet -g -l -p $repo_dir/yum/centos7 -r aws-fsx-src
-      - createrepo $repo_dir/yum/centos7
+      mkdir -p $repo_dir/yum/centos7
+      repos=( \
+          base updates extras centosplus \
+          cr \
+          #base-debuginfo \
+          fasttrack \
+          base-source updates-source extras-source centosplus-source \
+          centos-kernel centos-kernel-experimental \
+          epel epel-debuginfo epel-source \
+          epel-testing epel-testing-debuginfo epel-testing-source \
+          aws-fsx \
+          aws-fsx-src \
+      )
+      for repo in ${repos[@]}; do
+          echo -e "\nreposync --quiet -g -l -p $repo_dir/yum/centos7 --source --downloadcomps --download-metadata -r $repo"
+          if ! reposync --quiet -g -l -p $repo_dir/yum/centos7 --source --downloadcomps --download-metadata -r $repo; then
+              rc=$?
+              echo -e "warning: reposync failed with rc=$rc but trying to continue. GPC may have failed on a package."
+          fi
+          if [ -e $repo_dir/yum/centos7/$repo/comps.xml ]; then
+            groups_arg="-g comps.xml"
+          else
+            groups_arg=""
+          fi
+          echo -e "\ncreaterepo $repo_dir/yum/centos7/$repo $groups_arg"
+          createrepo $repo_dir/yum/centos7/$repo $groups_arg
+      done
 
     finally:
       - echo "build phase complete"

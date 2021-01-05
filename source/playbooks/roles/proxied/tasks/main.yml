@@ -7,7 +7,7 @@
     state: directory
     owner: root
     group: root
-    mode: 0775
+    mode: 0700
 
 - name: Create /root/bin/install-proxyCACert.sh
   template:

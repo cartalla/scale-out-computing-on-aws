@@ -10,4 +10,7 @@ cp scripts/config.cfg /root
 chmod +x cluster_node_bootstrap/*.sh
 cluster_node_bootstrap/ComputeNodeInstallDCV.sh
 
+mkdir -p /root/sem
+touch /root/sem/dcv-installed
+
 echo -e "\nPassed"

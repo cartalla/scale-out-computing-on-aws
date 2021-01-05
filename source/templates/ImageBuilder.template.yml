@@ -1,11 +1,11 @@
 AWSTemplateFormatVersion: 2010-09-09
 Description: (SOCA) - Create custom AMIs
 Parameters:
-  VpcCidr:
+  SocaDomain:
     Type: String
-    Default: 10.0.0.0/16
-    Description: VPC CIDR (/16)  Block (eg 10.0.0.0/16)
-    AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/16'
+
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
 
   ClusterId:
     Type: String
@@ -14,6 +14,12 @@ Parameters:
     Type: String
   
   S3InstallFolder:
+    Type: String
+
+  RepositoryBucket:
+    Type: String
+
+  RepositoryFolder:
     Type: String
   
   VpcId:
@@ -57,6 +63,9 @@ Parameters:
     Type: String
   
   SocaVersion:
+    Type: String
+
+  NoProxy:
     Type: String
   
 Conditions:
@@ -341,7 +350,10 @@ Resources:
                 Action:
                   - s3:Get*
                   - s3:List*
-                Resource: "*"
+                Resource:
+                  - "*"
+                  - !Sub "arn:aws:s3:::${RepositoryBucket}/${RepositoryFolder}"
+                  - !Sub "arn:aws:s3:::${RepositoryBucket}/${RepositoryFolder}/*"
 
               - Effect: Allow
                 Action:
@@ -372,7 +384,7 @@ Resources:
         'soca:ClusterId': !Ref ClusterId
       ResourceTags:
         'soca:ClusterId': !Ref ClusterId
-      TerminateInstanceOnFailure: true
+      TerminateInstanceOnFailure: false
       SnsTopicArn: !Ref PipelineNotificationsSns
       Logging:
         S3Logs:
@@ -405,13 +417,19 @@ Resources:
 
                       BaseOS=centos7
 
-                      echo export "EFS_DATA=${EFSDataDns}"  > /etc/environment
-                      echo export "EFS_APPS=${EFSAppsDns}" >> /etc/environment
-                      echo export "SOCA_BASE_OS=$BaseOS"   >> /etc/environment
-                      echo export "SOCA_CONFIGURATION=${ClusterId}" >> /etc/environment
                       echo export "AWS_DEFAULT_REGION=${AWS::Region}" >> /etc/environment
+                      echo export "EFS_DATA=${EFSDataDns}"  >> /etc/environment
+                      echo export "EFS_APPS=${EFSAppsDns}" >> /etc/environment
+                      echo export "NO_PROXY=${NoProxy}" >> /etc/environment
+                      echo export "SOCA_BASE_OS=$BaseOS"   >> /etc/environment
+                      echo export "SOCA_CLOUDFORMATION_STACK=${AWS::StackName}" >> /etc/environment
+                      echo export "SOCA_CONFIGURATION=${ClusterId}" >> /etc/environment
+                      echo export "SOCA_DOMAIN=${SocaDomain}" >> /etc/environment
+                      echo export "SOCA_HOSTED_ZONE_ID=${HostedZoneId}" >> /etc/environment
                       echo export "SOCA_INSTALL_BUCKET=${S3InstallBucket}" >> /etc/environment
                       echo export "SOCA_INSTALL_BUCKET_FOLDER=${S3InstallFolder}" >> /etc/environment
+                      echo export "SOCA_REPOSITORY_BUCKET=${RepositoryBucket}" >> /etc/environment
+                      echo export "SOCA_REPOSITORY_FOLDER=${RepositoryFolder}" >> /etc/environment
                       echo export "SOCA_VERSION=${SocaVersion}" >> /etc/environment
                       source /etc/environment
 
@@ -533,8 +551,6 @@ Resources:
       Description: Configure Centos 7 AMI for SOCA Node
       ParentImage: !Sub 'arn:aws:imagebuilder:${AWS::Region}:aws:image/centos-linux-7-minimal-x86/x.x.x'
       Components:
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux/1.0.0"
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux-kernel-mainline/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/aws-cli-version-2-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/amazon-cloudwatch-agent-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/python-3-linux/1.0.2"
@@ -597,8 +613,6 @@ Resources:
       Description: Configure Centos 7 AMI for SOCA Desktop Node
       ParentImage: !Sub 'arn:aws:imagebuilder:${AWS::Region}:aws:image/centos-linux-7-minimal-x86/x.x.x'
       Components:
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux/1.0.0"
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux-kernel-mainline/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/aws-cli-version-2-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/amazon-cloudwatch-agent-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/python-3-linux/1.0.2"
@@ -661,8 +675,6 @@ Resources:
       Description: Configure Centos 7 AMI for SOCA EDA Node
       ParentImage: !Sub 'arn:aws:imagebuilder:${AWS::Region}:aws:image/centos-linux-7-minimal-x86/x.x.x'
       Components:
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux/1.0.0"
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux-kernel-mainline/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/aws-cli-version-2-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/amazon-cloudwatch-agent-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/python-3-linux/1.0.2"
@@ -725,8 +737,6 @@ Resources:
       Description: Configure Centos 7 AMI for SOCA EDA Desktop Node
       ParentImage: !Sub 'arn:aws:imagebuilder:${AWS::Region}:aws:image/centos-linux-7-minimal-x86/x.x.x'
       Components:
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux/1.0.0"
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux-kernel-mainline/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/aws-cli-version-2-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/amazon-cloudwatch-agent-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/python-3-linux/1.0.2"
@@ -789,9 +799,7 @@ Resources:
       Version: 1.0.0
       Description: Configure Redhat 7 AMI for SOCA EDA Node
       ParentImage: !Sub 'arn:aws:imagebuilder:${AWS::Region}:aws:image/red-hat-enterprise-linux-7-x86/x.x.x'
-      Components: 
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux/1.0.0"
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux-kernel-mainline/1.0.0"
+      Components:
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/aws-cli-version-2-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/amazon-cloudwatch-agent-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/python-3-linux/1.0.2"
@@ -849,9 +857,7 @@ Resources:
       Version: 1.0.0
       Description: Configure Redhat 7 AMI for SOCA EDA Desktop Node
       ParentImage: !Sub 'arn:aws:imagebuilder:${AWS::Region}:aws:image/red-hat-enterprise-linux-7-x86/x.x.x'
-      Components: 
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux/1.0.0"
-        - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/update-linux-kernel-mainline/1.0.0"
+      Components:
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/aws-cli-version-2-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/amazon-cloudwatch-agent-linux/1.0.0"
         - ComponentArn: !Sub "arn:aws:imagebuilder:${AWS::Region}:aws:component/python-3-linux/1.0.2"

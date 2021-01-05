@@ -766,7 +766,6 @@ Resources:
                 Resource:
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket , "/*" ] ]
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket] ]
-                  - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}/${RepositoryFolder}/*", !Ref 'AWS::NoValue' ]
 
               - Effect: Allow
                 Action:
@@ -903,6 +902,8 @@ Resources:
             echo export "SOCA_HOSTED_ZONE_ID=${HostedZoneId}" >> /etc/environment
             echo export "SOCA_INSTALL_BUCKET=${S3InstallBucket}" >> /etc/environment
             echo export "SOCA_INSTALL_BUCKET_FOLDER=${S3InstallFolder}" >> /etc/environmentenvironment
+            echo export "SOCA_REPOSITORY_BUCKET=${RepositoryBucket}" >> /etc/environment
+            echo export "SOCA_REPOSITORY_FOLDER=${RepositoryFolder}" >> /etc/environment
 
             source /etc/environment
 
@@ -922,8 +923,6 @@ Resources:
                 /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionAutoScalingGroup --region ${AWS::Region} || true
             }
             trap on_exit EXIT
-
-            #ansible-playbook configure-repo.yml -e Region=${AWS::Region} -e Domain=${SocaDomain} -e S3InstallBucket=${S3InstallBucket} -e S3InstallFolder=${S3InstallFolder} -e ClusterId=${ClusterId} -e NoProxy=${NoProxy} -e RepositoryBucket=${RepositoryBucket} -e RepositoryFolder=${RepositoryFolder} >> /root/ansible-configure-repo.log 2>&1
 
             # Tag EBS disks manually as CFN ASG does not support it
             AWS_AVAIL_ZONE=$(curl http://169.254.169.254/latest/meta-data/placement/availability-zone)
@@ -1850,6 +1849,182 @@ Resources:
       GroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
       Description: ComputeNode - ELB Health checks
 
+
+  #============================================================================
+  # Lustre Security Groups
+  #============================================================================
+
+  LustreSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: SG for Lustre
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterId}-Lustre
+        - Key: soca:ClusterId
+          Value: !Ref ClusterId
+
+  LustreIngressLustre1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      SourceSecurityGroupId: !Ref LustreSecurityGroup
+      GroupId: !GetAtt LustreSecurityGroup.GroupId
+      Description: "Lustre"
+
+  LustreIngressComputeNode1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      SourceSecurityGroupId: !Ref ComputeNodeSecurityGroup
+      GroupId: !GetAtt LustreSecurityGroup.GroupId
+      Description: "ComputeNode"
+
+  LustreIngressLustre2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      SourceSecurityGroupId: !Ref LustreSecurityGroup
+      GroupId: !GetAtt LustreSecurityGroup.GroupId
+      Description: "Lustre"
+
+  LustreIngressComputeNode2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      SourceSecurityGroupId: !Ref ComputeNodeSecurityGroup
+      GroupId: !GetAtt LustreSecurityGroup.GroupId
+      Description: "ComputeNode"
+
+  LustreEgressLustre1:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      DestinationSecurityGroupId: !Ref LustreSecurityGroup
+      GroupId: !GetAtt LustreSecurityGroup.GroupId
+      Description: "Lustre"
+
+  LustreEgressLustre2:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      DestinationSecurityGroupId: !Ref LustreSecurityGroup
+      GroupId: !GetAtt LustreSecurityGroup.GroupId
+      Description: "Lustre"
+
+  LustreEgressComputeNode1:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      DestinationSecurityGroupId: !Ref ComputeNodeSecurityGroup
+      GroupId: !GetAtt LustreSecurityGroup.GroupId
+      Description: "ComputeNode"
+
+  LustreEgressComputeNode2:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      DestinationSecurityGroupId: !Ref ComputeNodeSecurityGroup
+      GroupId: !GetAtt LustreSecurityGroup.GroupId
+      Description: "ComputeNode"
+
+  ComputeNodeIngressComputeNodeLustre1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      SourceSecurityGroupId: !Ref ComputeNodeSecurityGroup
+      GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
+      Description: "ComputeNode"
+
+  ComputeNodeIngressComputeNodeLustre2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      SourceSecurityGroupId: !Ref ComputeNodeSecurityGroup
+      GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
+      Description: "ComputeNode"
+
+  ComputeNodeIngressLustre1:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      SourceSecurityGroupId: !Ref LustreSecurityGroup
+      GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
+      Description: "Lustre"
+
+  ComputeNodeIngressLustre2:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      SourceSecurityGroupId: !Ref LustreSecurityGroup
+      GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
+      Description: "Lustre"
+
+  ComputeNodeEgressComputeNodeLustre1:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      DestinationSecurityGroupId: !Ref ComputeNodeSecurityGroup
+      GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
+      Description: "ComputeNode"
+
+  ComputeNodeEgressComputeNodeLustre2:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      DestinationSecurityGroupId: !Ref ComputeNodeSecurityGroup
+      GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
+      Description: "ComputeNode"
+
+  ComputeNodeEgressLustre1:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 988
+      ToPort: 988
+      DestinationSecurityGroupId: !Ref LustreSecurityGroup
+      GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
+      Description: "Lustre"
+
+  ComputeNodeEgressLustre2:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 1021
+      ToPort: 1023
+      DestinationSecurityGroupId: !Ref LustreSecurityGroup
+      GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
+      Description: "Lustre"
+
   #============================================================================
   # Begin IAM
   #============================================================================
@@ -2007,6 +2182,7 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:ListBucket
+                  - s3:ListObject
                 Resource:
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket , "/*" ] ]
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket] ]

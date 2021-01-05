@@ -1,0 +1,10 @@
+#CentOS-fasttrack.repo
+
+[fasttrack]
+name=CentOS-7 - fasttrack
+baseurl=https://{{RepositoryBucket}}.s3-{{Region}}.amazonaws.com/{{RepositoryFolder}}/yum/centos7/fasttrack/
+s3_enabled=1
+gpgcheck=1
+enabled=0
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7
+

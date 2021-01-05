@@ -54,6 +54,9 @@ AWS=$(which aws)
 # Prepare PBS/System
 cd ~
 
+if [ -e /root/sem/soca-packages-installed ]; then
+    info "SOCA packages already installed"
+else
 # Install System required libraries
 info "Installing required packages"
 if [[ $SOCA_BASE_OS == "rhel7" ]];
@@ -66,6 +69,7 @@ fi
 yum install -y $(echo ${OPENLDAP_SERVER_PKGS[*]} ${SSSD_PKGS[*]})
 
 info "Required packages installed"
+fi
 
 # Configure Scratch Directory if specified by the user
 if [ ! -e /var/lib/cloud/instance/sem/scratch_configured ]; then
@@ -143,6 +147,9 @@ touch /var/lib/cloud/instance/sem/scratch_configured
 info "/scratch configured"
 fi
 
+if [ -e /root/sem/pbs-installed]; then
+    info "OpenPBS already installed"
+else
 # Install OpenPBS if needed
 cd ~
 OPENPBS_INSTALLED_VERS=$(/opt/pbs/bin/qstat --version | awk {'print $NF'})
@@ -167,6 +174,7 @@ then
     info "Installed OpenPBS"
 else
     info "OpenPBS already installed, and at correct version."
+fi
 fi
 
 # Edit path with new scheduler/python locations

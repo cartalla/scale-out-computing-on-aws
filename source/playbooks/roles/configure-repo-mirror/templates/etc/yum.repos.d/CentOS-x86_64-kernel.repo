@@ -1,0 +1,15 @@
+[centos-kernel]
+name=CentOS LTS Kernels for $basearch
+baseurl=https://{{RepositoryBucket}}.s3-{{Region}}.amazonaws.com/{{RepositoryFolder}}/yum/centos7/centos-kernel/
+s3_enabled=1
+enabled=0
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7
+
+[centos-kernel-experimental]
+name=CentOS Experimental Kernels for $basearch
+baseurl=https://{{RepositoryBucket}}.s3-{{Region}}.amazonaws.com/{{RepositoryFolder}}/yum/centos7/centos-kernel-experimental/
+s3_enabled=1
+enabled=0
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7

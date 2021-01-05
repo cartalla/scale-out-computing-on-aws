@@ -136,10 +136,12 @@ Resources:
             echo export "SOCA_CONFIGURATION=${ClusterId}" >> /etc/environment
             echo export "SOCA_DOMAIN=${SocaDomain}" >> /etc/environment
             echo export "SOCA_HOSTED_ZONE_ID=${HostedZoneId}" >> /etc/environment
+            echo export "SOCA_INSTALL_AMI=${ComputeNodeCustomAMI}" >> /etc/environment
             echo export "SOCA_INSTALL_BUCKET=${S3InstallBucket}" >> /etc/environment
             echo export "SOCA_INSTALL_BUCKET_FOLDER=${S3InstallFolder}" >> /etc/environment
+            echo export "SOCA_REPOSITORY_BUCKET=${RepositoryBucket}" >> /etc/environment
+            echo export "SOCA_REPOSITORY_FOLDER=${RepositoryFolder}" >> /etc/environment
             echo export "SOCA_VERSION=${Version}" >> /etc/environment
-            echo export "SOCA_INSTALL_AMI=${ComputeNodeCustomAMI}" >> /etc/environment
 
             source /etc/environment
 
@@ -149,7 +151,7 @@ Resources:
             rm -rf /root/playbooks
             aws s3 cp --recursive s3://${S3InstallBucket}/${S3InstallFolder}/playbooks/ /root/playbooks/
             cd /root/playbooks
-            ansible-playbook scheduler.yml -e Region=${AWS::Region} -e Domain=${SocaDomain} -e S3InstallBucket=${S3InstallBucket} -e S3InstallFolder=${S3InstallFolder} -e ClusterId=${ClusterId} -e NoProxy=${NoProxy} -e NodeType=scheduler >> /root/ansible.log 2>&1
+            ansible-playbook scheduler.yml -e Region=${!AWS_DEFAULT_REGION} -e Domain=${!SOCA_DOMAIN} -e S3InstallBucket=${!SOCA_INSTALL_BUCKET} -e S3InstallFolder=${!SOCA_INSTALL_BUCKET_FOLDER} -e RepositoryBucket=${!SOCA_REPOSITORY_BUCKET} -e RepositoryFolder=${!SOCA_REPOSITORY_FOLDER} -e ClusterId=${ClusterId} -e NoProxy=${NoProxy} -e NodeType=scheduler >> /root/ansible.log 2>&1
 
             source /etc/profile.d/proxy.sh
 

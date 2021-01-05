@@ -2,12 +2,6 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: Create CentOS 7 Yum Repo Mirrors on S3
 
 Parameters:
-  S3InstallBucket:
-    Type: String
-
-  S3InstallFolder:
-    Type: String
-
   S3MirrorRepoBucket:
     Type: String
 
@@ -49,7 +43,6 @@ Resources:
                   - s3:List*
                   - s3:PutObject
                 Resource:
-                  - !Sub "arn:aws:s3:::${S3InstallBucket}/${S3InstallFolder}/*"
                   - !Sub "arn:aws:s3:::${S3MirrorRepoBucket}/${S3MirrorRepoFolder}/*"
 
               - Effect: Allow
@@ -74,16 +67,12 @@ Resources:
       Description: Build CentOS 7 yum repo mirror and store in S3
       Source: 
         Type: S3
-        Location: !Sub "${S3InstallBucket}/${S3InstallFolder}/MirrorRepos/"
+        Location: !Sub "${S3MirrorRepoBucket}/${S3MirrorRepoFolder}/source/MirrorRepos/"
       Environment:
           Type: LINUX_CONTAINER
           Image: centos:centos7
           ComputeType: BUILD_GENERAL1_MEDIUM
           EnvironmentVariables: 
-            - Name: S3_INSTALL_BUCKET
-              Value: !Ref S3InstallBucket
-            - Name: S3_INSTALL_FOLDER
-              Value: !Ref S3InstallFolder 
             - Name: S3_MIRROR_REPO_BUCKET
               Value: !Ref S3MirrorRepoBucket
             - Name: S3_MIRROR_REPO_FOLDER
@@ -94,6 +83,111 @@ Resources:
       ServiceRole: !Ref CodeBuildRole
       TimeoutInMinutes: 60
 
+  #============================================================================
+  # Lambda to manually kick off a build
+  #============================================================================
+
+  StartCodeBuildProjectBuildLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: StartPipeline
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DeleteLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":logs:", !Ref "AWS::Region", ":", !Ref  "AWS::AccountId", ":log-group:/aws/lambda/", !Ref AWS::StackName, "*"] ]
+
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                Resource:
+                  - '*'
+
+  StartCodeBuildProjectBuildLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Run CodeBuild Project
+      FunctionName: !Sub "${AWS::StackName}-StartCodeBuildProjectBuild"
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt StartCodeBuildProjectBuildLambdaRole.Arn
+      Runtime: python3.7
+      Timeout: 180
+      Tags:
+        - Key: soca:ClusterId
+          Value: !Ref AWS::StackName
+      Code:
+        ZipFile: !Sub |
+          import cfnresponse
+          import boto3
+          import logging
+          from os import environ
+          import urllib
+          '''
+          Create/delete DNS entry
+          '''
+          logging.getLogger().setLevel(logging.INFO)
+          def lambda_handler(event, context):
+            try:
+              logging.info("event: {}".format(event))
+              requestType = event['RequestType']
+              if requestType in ['Delete']:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, "")
+                  return
+
+              properties = event['ResourceProperties']
+              expected_properties = ['ProjectName']
+              error_message = ""
+              for property in expected_properties:
+                try:
+                  value = event['ResourceProperties'][property]
+                except:
+                  error_message += "Missing {} property. ".format(property)
+              if error_message:
+                raise KeyError(error_message)
+
+              projectName = properties['ProjectName']
+              region = environ['AWS_REGION']
+              codebuild_client = boto3.client('codebuild')
+              response = codebuild_client.start_build(
+                projectName=projectName,
+              )
+              logging.info(str(response))
+              buildId = response['build']['id']
+              logging.info("buildId: {}".format(buildId))
+              buildUrl = "https://{}.console.aws.amazon.com/codesuite/codebuild/${AWS::AccountId}/projects/{}/build/{}/?region={}".format(region, projectName, urllib.parse.quote(buildId), region)
+              logging.info("buildUrl: {}".format(buildUrl))
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {'buildId': buildId, 'buildUrl': buildUrl}, "{}".format(buildId))
+            except Exception as e:
+              logging.exception(str(e))
+              cfnresponse.send(event, context, cfnresponse.FAILED, {'error': str(e)}, str(e))
+
+  MirrorCentos7ReposBuild:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt StartCodeBuildProjectBuildLambda.Arn
+      ProjectName: !Ref MirrorCentos7ReposProject
+
 Outputs:
   MirrorCentos7ReposProject:
     Value: !Sub "https://console.aws.amazon.com/codesuite/codebuild/${AWS::AccountId}/projects/${MirrorCentos7ReposProject}?region=${AWS::Region}"
+  MirrorCentos7ReposBuildId:
+    Value: !GetAtt MirrorCentos7ReposBuild.buildId
+  MirrorCentos7ReposBuildUrl:
+    Value: !GetAtt MirrorCentos7ReposBuild.buildUrl

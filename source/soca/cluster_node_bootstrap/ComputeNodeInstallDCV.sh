@@ -17,7 +17,7 @@ function info {
 }
 
 function error {
-    echo "$(date):INFO: $1"
+    echo "$(date):ERROR: $1"
 }
 
 info "Starting $0"
@@ -47,7 +47,11 @@ then
   bash -c 'echo PREFERRED=/usr/bin/mate-session > /etc/sysconfig/desktop'
 else
   # Centos7
-  yum groupinstall "GNOME Desktop" -y
+  if ! yum groupinstall -y "GNOME Desktop"; then
+    error "Failed to install GNOME Desktop"
+    yum grouplist
+    yum grouplist -y "gnome-desktop"
+  fi
 fi
 
 # Install latest NVIDIA driver if GPU instance is detected

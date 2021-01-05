@@ -467,9 +467,13 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
+        SocaDomain: 'soca.local'
+        HostedZoneId: !GetAtt Network.Outputs.HostedZoneId
         ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
         S3InstallBucket: !Ref S3InstallBucket
         S3InstallFolder: !Ref S3InstallFolder
+        RepositoryBucket: !Ref RepositoryBucket
+        RepositoryFolder: !Ref RepositoryFolder
         VpcId: !GetAtt Network.Outputs.VpcId
         ClientIp: !Ref ClientIp
         PrefixListId: !Ref PrefixListId
@@ -482,6 +486,7 @@ Resources:
         EFSDataDns: !GetAtt Storage.Outputs.EFSDataDns
         EFSAppsDns: !GetAtt Storage.Outputs.EFSAppsDns
         SocaVersion: !FindInMap [ Info, Data, Version ]
+        NoProxy: !GetAtt Security.Outputs.NoProxy
   
       TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/ImageBuilder.template.yml"] ]
       TimeoutInMinutes: 60

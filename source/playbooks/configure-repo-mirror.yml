@@ -1,9 +1,7 @@
 ---
-- name: Configure ComputeNode instance
+- name: Configure instance to use private S3 yum repository
   hosts: 127.0.0.1
   become_user: root
   become: yes
   roles:
-    - proxied
     - configure-repo-mirror
-    - common

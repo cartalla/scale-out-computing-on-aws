@@ -331,7 +331,7 @@ source /etc/profile.d/proxy.sh
 
 cat <<EOF > /etc/yum.repos.d/10_proxy.conf
 [main]
-proxy=http://''' + soca_configuration['ProxyPrivateDnsName'] + '''proxyserver:3128/
+proxy=http://''' + soca_configuration['ProxyPrivateDnsName'] + ''':3128/
 EOF
 
 if grep -q 'Amazon Linux release 2' /etc/system-release; then
@@ -341,7 +341,37 @@ elif grep -q 'CentOS Linux release 7' /etc/system-release; then
 else
     BASE_OS=rhel7
 fi
-echo $BASE_OS
+echo "BASE_OS: $BASE_OS"
+
+# Install pip and awscli
+export PATH=$PATH:/usr/local/bin
+if [[ "$BASE_OS" == "centos7" ]] || [[ "$BASE_OS" == "rhel7" ]];
+then
+     yum install -y python3-pip
+     PIP=$(which pip3)
+     $PIP install awscli
+else
+     yum install -y python3-pip
+     PIP=$(which pip3)
+     $PIP install awscli
+fi
+
+# Configure using ansible
+# If not amazon linux then the proxy needs to be set up before ansible can be installed.
+# The playbooks are downloaded from S3 using the S3 VPC endpoint so don't require the proxy.
+if ! yum list installed ansible &> /dev/null; then
+    if [ $BASE_OS == "amazonlinux2" ]; then
+        amazon-linux-extras install -y ansible2
+    else
+        if ! yum list installed epel-release &> /dev/null; then
+            yum -y install epel-release
+        fi
+        yum -y install ansible
+    fi
+fi
+aws s3 cp --recursive s3://''' + soca_configuration['S3Bucket'] + '''/''' + soca_configuration['S3InstallFolder'] + '''/playbooks/ /root/playbooks/
+cd /root/playbooks
+ansible-playbook computeNode.yml -e Region=''' + soca_configuration['Region'] + ''' -e Domain=''' + soca_configuration['SocaDomain'] + ''' -e S3InstallBucket=''' + soca_configuration['S3Bucket'] + ''' -e S3InstallFolder=''' + soca_configuration['S3InstallFolder'] + ''' -e RepositoryBucket=''' + soca_configuration['RepositoryBucket'] + ''' -e RepositoryFolder=''' + soca_configuration['RepositoryFolder'] + ''' -e ClusterId=''' + soca_configuration['ClusterId'] + ''' -e NoProxy=''' + soca_configuration['NoProxy'] + ''' -e NodeType=dcv >> /root/ansible.log 2>&1
 
 export PATH=$PATH:/usr/local/bin
 if [[ "$BASE_OS" == "centos7" ]] || [[ "$BASE_OS" == "rhel7" ]];

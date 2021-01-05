@@ -43,6 +43,7 @@
     mode: 0700
 
 - name: Create /root/cw-agent-config/cw-agent-config-{{NodeType}}.json
+  register: cw_agent_config_json
   template:
     src:   root/cw-agent-config/cw-agent-config-{{NodeType}}.json
     dest: /root/cw-agent-config/cw-agent-config-{{NodeType}}.json
@@ -53,10 +54,13 @@
     force: yes
 
 - name: Configure amazon-cloudwatch-agent
+  when: cw_agent_config_json['changed']
+  register: cw_agent_configured
   shell:
     cmd: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -m ec2 -a fetch-config /root/cw-agent-config/{{NodeType}}.json
 
 - name: Start amazon-cloudwatch-agent
+  when: cw_agent_configured['changed']
   shell:
     cmd: /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -m ec2 -a start
 

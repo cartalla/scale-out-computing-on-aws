@@ -102,6 +102,7 @@ elif grep -q 'CentOS Linux release 7' /etc/system-release; then
 else
     BASE_OS=rhel7
 fi
+echo "BASE_OS: $BASE_OS"
 
 # Install pip and awscli
 export PATH=$PATH:/usr/local/bin
