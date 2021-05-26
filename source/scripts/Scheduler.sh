@@ -1,52 +1,70 @@
-#!/bin/bash
+#!/bin/bash -xe
 
-if [ $# -lt 2 ]
+# Notify user of errors
+function on_exit {
+    rc=$?
+    set +e
+    if [[ $rc -ne 0 ]]; then
+        aws sns publish --topic-arn ${ErrorSnsTopicArn} --subject "${ClusterId} Scheduler.sh failed" --message "See /root/Scheduler.sh.log for more info."
+    fi
+}
+trap on_exit EXIT
+
+if [ $# -lt 3 ]
   then
-    echo "usage: $0 EFS_DATA EFS_APPS"
+    echo "usage: $0 EFS_DATA EFS_APPS ErrorSnsTopicArn"
     exit 1
 fi
 
-set -ex
-
 EFS_DATA=$1
 EFS_APPS=$2
+ErrorSnsTopicArn=$3
 
 source /etc/environment
 source /root/config.cfg
-source /etc/profile.d/proxy.sh
+if [ -e /etc/profile.d/proxy.sh ]; then
+    source /etc/profile.d/proxy.sh
+fi
 
-# Signal Cloudformation if the instance creates successfully or not
-yum -y install -y aws-cfn-bootstrap
-function on_exit {
-    /opt/aws/bin/cfn-signal -e $? --stack ${SOCA_CLOUDFORMATION_STACK} --resource SchedulerEC2Host --region ${AWS_DEFAULT_REGION} || true
-}
-trap on_exit EXIT
+# Install SSM
+if ! yum list amazon-ssm-agent; then
+    yum install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+fi
+systemctl enable amazon-ssm-agent || true
+systemctl restart amazon-ssm-agent
 
 SERVER_IP=$(hostname -I)
 SERVER_HOSTNAME=$(hostname)
 SERVER_HOSTNAME_ALT=$(echo $SERVER_HOSTNAME | cut -d. -f1)
 echo $SERVER_IP $SERVER_HOSTNAME $SERVER_HOSTNAME_ALT >> /etc/hosts
 
-if [[ $SOCA_BASE_OS == "rhel7" ]]
-then
-    yum install -y $(echo ${SYSTEM_PKGS[*]} ${SCHEDULER_PKGS[*]}) --enablerepo rhui-REGION-rhel-server-optional
-else
-    yum install -y $(echo ${SYSTEM_PKGS[*]} ${SCHEDULER_PKGS[*]})
-fi
+yum install -y $(echo ${SYSTEM_PKGS[*]} ${SCHEDULER_PKGS[*]})
 
 yum install -y $(echo ${OPENLDAP_SERVER_PKGS[*]} ${SSSD_PKGS[*]})
 
 # Mount EFS
 if [ ! -d /data ]; then
     mkdir -p /data
+fi
+if ! grep "$EFS_DATA:/ /data/ " /etc/fstab; then
     echo "$EFS_DATA:/ /data/ nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
+fi
+if ! findmnt -m /data; then
+    mount /data
 fi
 if [ ! -d /apps ]; then
     mkdir -p /apps
+fi
+if ! grep "$EFS_APPS:/ /apps " /etc/fstab; then
     echo "$EFS_APPS:/ /apps nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
 fi
-mount -a
+if ! findmnt -m /apps; then
+    mount /apps
+fi
+# mount -a fails if /etc/fstab includes lustre mounts that have already been mounted.
+#mount -a
 
+# This mkdir needs to happen after /apps has been mounted
 mkdir -p /apps/soca/$SOCA_CONFIGURATION
 
 # Install Python if needed
@@ -56,16 +74,30 @@ then
     echo "Python not detected, installing"
     mkdir -p /apps/soca/$SOCA_CONFIGURATION/python/installer
     cd /apps/soca/$SOCA_CONFIGURATION/python/installer
-    wget $PYTHON_URL
-    if [[ $(md5sum $PYTHON_TGZ | awk '{print $1}') != $PYTHON_HASH ]];  then
-        echo -e "FATAL ERROR: Checksum for Python failed. File may be compromised." > /etc/motd
-        exit 1
+    compiled_python_tgz=Python-$PYTHON_VERSION-compiled.tgz
+    if aws s3 cp s3://${SOCA_REPOSITORY_BUCKET}/${SOCA_REPOSITORY_FOLDER}/source/python/$compiled_python_tgz .; then
+        cd ..
+        tar -xzf installer/$compiled_python_tgz
+    else
+        if [ ":${SOCA_REPOSITORY_BUCKET}" != ":" ] && [ ":${SOCA_REPOSITORY_FOLDER}" != ":" ]; then
+            aws s3 cp s3://${SOCA_REPOSITORY_BUCKET}/${SOCA_REPOSITORY_FOLDER}/source/python/${PYTHON_TGZ} .
+        else
+            wget $PYTHON_URL
+        fi
+        if [[ $(md5sum $PYTHON_TGZ | awk '{print $1}') != $PYTHON_HASH ]];  then
+            echo -e "FATAL ERROR: Checksum for Python failed. File may be compromised." > /etc/motd
+            exit 1
+        fi
+        tar xzf $PYTHON_TGZ
+        cd Python-$PYTHON_VERSION
+        ./configure LDFLAGS="-L/usr/lib64/openssl" CPPFLAGS="-I/usr/include/openssl" -enable-loadable-sqlite-extensions --prefix=/apps/soca/$SOCA_CONFIGURATION/python/$PYTHON_VERSION
+        make
+        make install
+
+        # Install Python required libraries
+        # Source environment to reload path for Python3
+        /apps/soca/$SOCA_CONFIGURATION/python/$PYTHON_VERSION/bin/pip3 install -r /root/requirements.txt
     fi
-    tar xvf $PYTHON_TGZ
-    cd Python-$PYTHON_VERSION
-    ./configure LDFLAGS="-L/usr/lib64/openssl" CPPFLAGS="-I/usr/include/openssl" -enable-loadable-sqlite-extensions --prefix=/apps/soca/$SOCA_CONFIGURATION/python/$PYTHON_VERSION
-    make
-    make install
     ln -sf /apps/soca/$SOCA_CONFIGURATION/python/$PYTHON_VERSION /apps/soca/$SOCA_CONFIGURATION/python/latest
 else
     echo "Python already installed and at correct version."
@@ -78,7 +110,11 @@ if [[ "$OPENPBS_INSTALLED_VERS" != "$OPENPBS_VERSION" ]]
 then
     echo "OpenPBS Not Detected, Installing OpenPBS ..."
     cd ~
-    wget $OPENPBS_URL
+    if [ ":${SOCA_REPOSITORY_BUCKET}" != ":" ] && [ ":${SOCA_REPOSITORY_FOLDER}" != ":" ]; then
+        aws s3 cp s3://${SOCA_REPOSITORY_BUCKET}/${SOCA_REPOSITORY_FOLDER}/source/openpbs/${OPENPBS_TGZ} .
+    else
+        wget $OPENPBS_URL
+    fi
     if [[ $(md5sum $OPENPBS_TGZ | awk '{print $1}') != $OPENPBS_HASH ]];  then
         echo -e "FATAL ERROR: Checksum for OpenPBS failed. File may be compromised." > /etc/motd
         exit 1
@@ -194,7 +230,7 @@ if [ ! -e /var/lib/cloud/instance/sem/pbs_queue_config_done ]; then
 # Add compute_node to list of required resource
 sed -i 's/resources: "ncpus, mem, arch, host, vnode, aoe, eoe"/resources: "ncpus, mem, arch, host, vnode, aoe, eoe, compute_node"/g' /var/spool/pbs/sched_priv/sched_config
 
-    touch /var/lib/cloud/instance/sem/pbs_queue_config_done
+touch /var/lib/cloud/instance/sem/pbs_queue_config_done
 fi
 
 if [ ! -e /var/lib/cloud/instance/sem/ldap_configured ]; then
@@ -374,10 +410,6 @@ sed -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
 # Disable StrictHostKeyChecking
 echo "StrictHostKeyChecking no" >> /etc/ssh/ssh_config
 echo "UserKnownHostsFile /dev/null" >> /etc/ssh/ssh_config
-
-# Install Python required libraries
-# Source environment to reload path for Python3
-/apps/soca/$SOCA_CONFIGURATION/python/$PYTHON_VERSION/bin/pip3 install -r /root/requirements.txt
 
 if [ ! -e /var/lib/cloud/instance/sem/chrony_configured ]; then
 # Configure Chrony

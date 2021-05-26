@@ -12,7 +12,7 @@ function info {
 }
 
 function error {
-    echo "$(date):INFO: $1"
+    echo "$(date):ERROR: $1"
 }
 
 info "Starting $0"

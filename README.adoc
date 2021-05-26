@@ -7,6 +7,8 @@ https://awslabs.github.io/scale-out-computing-on-aws/[https://awslabs.github.io/
 
 == :rocket: How to install Scale-Out Computing on AWS
 
+Refer to https://awslabs.github.io/scale-out-computing-on-aws/tutorials/install-soca-cluster/[https://awslabs.github.io/scale-out-computing-on-aws/tutorials/install-soca-cluster/] for installation instructions.
+
 === 1-Click installer
 
 Visit https://aws.amazon.com/solutions/scale-out-computing-on-aws[https://aws.amazon.com/solutions/scale-out-computing-on-aws]
@@ -76,7 +78,7 @@ Scale-Out Computing on AWS project consists in a collection of CloudFormation te
 
 ***
 
-Copyright 2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+Copyright 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.

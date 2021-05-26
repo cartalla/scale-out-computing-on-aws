@@ -19,6 +19,7 @@ import os
 import json
 from cryptography.fernet import Fernet
 import dcv_cloudformation_builder
+from urllib.parse import urlparse
 
 
 remote_desktop = Blueprint('remote_desktop', __name__, template_folder='templates')
@@ -54,7 +55,7 @@ def can_launch_instance(launch_parameters):
                     'Ebs': {
                         'DeleteOnTermination': True,
                         'VolumeSize': 30 if launch_parameters["disk_size"] is False else int(launch_parameters["disk_size"]),
-                        'VolumeType': 'gp2',
+                        'VolumeType': 'gp3',
                         'Encrypted': True
                     },
                 },
@@ -211,7 +212,8 @@ def index():
                 db.session.commit()
 
         user_sessions[session_number] = {
-            "url": 'https://' + read_secretmanager.get_soca_configuration()['LoadBalancerDNSName'] + '/' + session_host_private_dns +'/',
+            #"url": 'https://' + read_secretmanager.get_soca_configuration()['LoadBalancerDNSName'] + '/' + session_host_private_dns +'/',
+            "url": 'https://' + urlparse(request.host_url).hostname + '/' + session_host_private_dns +'/',
             "session_state": session_state,
             "session_authentication_token": dcv_authentication_token,
             "session_id": session_id,
@@ -303,14 +305,34 @@ def create():
             return redirect("/remote_desktop")
 
 
-    user_data = '''#!/bin/bash -x
+    user_data = '''#!/bin/bash -xe
 
-# Configure the proxy
-value="''' + soca_configuration['ProxyCACert'] + '''"
-echo $value >  /etc/pki/ca-trust/source/anchors/proxyCA.pem
-update-ca-trust
+# Handle errors
+function on_exit {
+    rc=$?
+    set +e
+    if [[ $rc -ne 0 ]]; then
+        echo "UserData failed"
+        # aws sns publish --topic-arn ${!ErrorSnsTopicArn} --subject "${!ClusterId} Proxy UserData failed" --message "See /var/log/cloud-init.log or grep cloud-init /var/log/messages | less for more info."
+    fi
+}
+trap on_exit EXIT
 
-cat <<EOF > /etc/profile.d/proxy.sh
+touch /root/patch-hold
+
+publicVpc=''' + soca_configuration['PublicVpc'] + '''
+if [ $publicVpc == "true" ]; then
+    # Configure the proxy
+    # Can't get ProxyCACert from ssm because it requires awscli which requires yum to be configured to use proxy.
+    # Get ProxyCACert from secrets
+    parameter_name="''' + soca_configuration['ProxyCACertParameterName'] + '''"
+    target=/etc/pki/ca-trust/source/anchors/proxyCA.pem
+    #aws --region {{Region}} ssm get-parameter --name $parameter_name --query 'Parameter.Value' --output text > $target
+    value="''' + soca_configuration['ProxyCACert'] + '''"
+    echo "''' + soca_configuration['ProxyCACert'] + '''" >  $target
+    update-ca-trust
+
+    cat <<EOF > /etc/profile.d/proxy.sh
 proxy_url="http://''' + soca_configuration['ProxyPrivateDnsName'] + ''':3128/"
 
 export HTTP_PROXY=\$proxy_url
@@ -327,12 +349,13 @@ export no_proxy=\$NO_PROXY
 
 export REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 EOF
-source /etc/profile.d/proxy.sh
+    source /etc/profile.d/proxy.sh
 
-cat <<EOF > /etc/yum.repos.d/10_proxy.conf
+    cat <<EOF > /etc/yum.repos.d/10_proxy.conf
 [main]
 proxy=http://''' + soca_configuration['ProxyPrivateDnsName'] + ''':3128/
 EOF
+fi
 
 if grep -q 'Amazon Linux release 2' /etc/system-release; then
     BASE_OS=amazonlinux2
@@ -343,25 +366,50 @@ else
 fi
 echo "BASE_OS: $BASE_OS"
 
-# Install pip and awscli
-export PATH=$PATH:/usr/local/bin
-if [[ "$BASE_OS" == "centos7" ]] || [[ "$BASE_OS" == "rhel7" ]];
-then
-     yum install -y python3-pip
-     PIP=$(which pip3)
-     $PIP install awscli
-else
-     yum install -y python3-pip
-     PIP=$(which pip3)
-     $PIP install awscli
+# Mount EFS
+# Do this so can access files required to bootstrap a Centos instance that
+# doesn't have fundamental things installed like amazon-ssm-agent and awscli.
+# In a private VPC you can't even install the awscli and access S3 top configure the private s3 repository.
+if [ ! -d /data ]; then
+    mkdir -p /data
 fi
+EFS_DATA=''' + soca_configuration['EFSDataDns'] + '''
+if ! grep "$EFS_DATA:/ /data/ " /etc/fstab; then
+    echo "$EFS_DATA:/ /data/ nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
+fi
+if ! findmnt -m /data; then
+    mount /data
+fi
+if [ ! -d /apps ]; then
+    mkdir -p /apps
+fi
+EFS_APPS=''' + soca_configuration['EFSAppsDns'] + '''
+if ! grep "$EFS_APPS:/ /apps " /etc/fstab; then
+    echo "$EFS_APPS:/ /apps nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
+fi
+if ! findmnt -m /apps; then
+    mount /apps
+fi
+# mount -a fails if /etc/fstab includes lustre mounts that have already been mounted.
+#mount -a
+
+# Install awscli
+export PATH=$PATH:/usr/local/bin
+if ! aws --version; then
+    # Get package directly from EFS where it was put by the scheduler.
+    /apps/soca/''' + soca_configuration['ClusterId'] + '''/cluster_node_bootstrap/aws/install
+fi
+
+export SOCA_REPOSITORY_BUCKET="''' + soca_configuration['RepositoryBucket'] + '''"
+export SOCA_REPOSITORY_FOLDER="''' + soca_configuration['RepositoryFolder'] + '''"
 
 # Configure using ansible
 # If not amazon linux then the proxy needs to be set up before ansible can be installed.
 # The playbooks are downloaded from S3 using the S3 VPC endpoint so don't require the proxy.
 if ! yum list installed ansible &> /dev/null; then
     if [ $BASE_OS == "amazonlinux2" ]; then
-        amazon-linux-extras install -y ansible2
+        amazon-linux-extras enable ansible2
+        yum -y install ansible
     else
         if ! yum list installed epel-release &> /dev/null; then
             yum -y install epel-release
@@ -371,19 +419,11 @@ if ! yum list installed ansible &> /dev/null; then
 fi
 aws s3 cp --recursive s3://''' + soca_configuration['S3Bucket'] + '''/''' + soca_configuration['S3InstallFolder'] + '''/playbooks/ /root/playbooks/
 cd /root/playbooks
-ansible-playbook computeNode.yml -e Region=''' + soca_configuration['Region'] + ''' -e Domain=''' + soca_configuration['SocaDomain'] + ''' -e S3InstallBucket=''' + soca_configuration['S3Bucket'] + ''' -e S3InstallFolder=''' + soca_configuration['S3InstallFolder'] + ''' -e RepositoryBucket=''' + soca_configuration['RepositoryBucket'] + ''' -e RepositoryFolder=''' + soca_configuration['RepositoryFolder'] + ''' -e ClusterId=''' + soca_configuration['ClusterId'] + ''' -e NoProxy=''' + soca_configuration['NoProxy'] + ''' -e NodeType=dcv >> /root/ansible.log 2>&1
+ansible-playbook /root/playbooks/computeNode.yml -e Region=''' + soca_configuration['Region'] + ''' -e RepositoryBucket=${!SOCA_REPOSITORY_BUCKET} -e RepositoryFolder=${!SOCA_REPOSITORY_FOLDER} -e Domain=''' + soca_configuration['SocaLocalDomain'] + ''' -e S3InstallBucket=''' + soca_configuration['S3Bucket'] + ''' -e S3InstallFolder=''' + soca_configuration['S3InstallFolder'] + ''' -e RepositoryBucket=''' + soca_configuration['RepositoryBucket'] + ''' -e RepositoryFolder=''' + soca_configuration['RepositoryFolder'] + ''' -e ClusterId=''' + soca_configuration['ClusterId'] + ''' -e PublicVpc=''' + soca_configuration['PublicVpc'] + ''' -e ProxyCACertParameterName=''' + soca_configuration['ProxyCACertParameterName'] + ''' -e NoProxy=''' + soca_configuration['NoProxy'] + ''' -e NodeType=dcv >> /root/ansible.log 2>&1
 
-export PATH=$PATH:/usr/local/bin
 if [[ "$BASE_OS" == "centos7" ]] || [[ "$BASE_OS" == "rhel7" ]];
 then
-        yum install -y python3-pip
-        PIP=$(which pip3)
-        $PIP install awscli
-        yum install -y nfs-utils # enforce install of nfs-utils
-else
-     yum install -y python3-pip
-     PIP=$(which pip3)
-     $PIP install awscli
+        yum install -y nfs-utils # enforce install of nfs-utils``
 fi
 if [[ "$BASE_OS" == "amazonlinux2" ]];
     then
@@ -404,25 +444,18 @@ echo export "SOCA_INSTALL_BUCKET_FOLDER="''' + str(soca_configuration['S3Install
 echo export "SOCA_INSTANCE_TYPE=$GET_INSTANCE_TYPE" >> /etc/environment
 echo export "SOCA_HOST_SYSTEM_LOG="/apps/soca/''' + str(soca_configuration['ClusterId']) + '''/cluster_node_bootstrap/logs/desktop/''' + str(session["user"]) + '''/''' + session_name + '''/$(hostname -s)"" >> /etc/environment
 echo export "AWS_DEFAULT_REGION="'''+region+'''"" >> /etc/environment
+# Required for proper EBS tagging
+echo export "SOCA_JOB_ID="''' + str(session_name) +'''"" >> /etc/environment
+echo export "SOCA_JOB_OWNER="''' + str(session["user"]) + '''"" >> /etc/environment
+echo export "SOCA_JOB_PROJECT="dcv"" >> /etc/environment
+echo export "SOCA_JOB_QUEUE="dcv"" >> /etc/environment
+echo export "SOCA_REPOSITORY_BUCKET=${!SOCA_REPOSITORY_BUCKET}" >> /etc/environment
+echo export "SOCA_REPOSITORY_FOLDER=${!SOCA_REPOSITORY_FOLDER}" >> /etc/environment
+
 source /etc/environment
 AWS=$(which aws)
 # Give yum permission to the user on this specific machine
 echo "''' + session['user'] + ''' ALL=(ALL) /bin/yum" >> /etc/sudoers
-mkdir -p /apps
-mkdir -p /data
-# Mount EFS
-echo "''' + soca_configuration['EFSDataDns'] + ''':/ /data nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
-echo "''' + soca_configuration['EFSAppsDns'] + ''':/ /apps nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
-EFS_MOUNT=0
-mount -a 
-while [[ $? -ne 0 ]] && [[ $EFS_MOUNT -lt 5 ]]
-    do
-    SLEEP_TIME=$(( RANDOM % 60 ))
-    echo "Failed to mount EFS, retrying in $SLEEP_TIME seconds and Loop $EFS_MOUNT/5..."
-    sleep $SLEEP_TIME
-    ((EFS_MOUNT++))
-    mount -a
-  done
 
 # Configure Chrony
 yum remove -y ntp
@@ -463,29 +496,28 @@ chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodePostRe
 echo "@reboot /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodePostReboot.sh >> $SOCA_HOST_SYSTEM_LOG/ComputeNodePostReboot.log 2>&1" | crontab -
 $AWS s3 cp s3://$SOCA_INSTALL_BUCKET/$SOCA_INSTALL_BUCKET_FOLDER/scripts/config.cfg /root/
 chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNode.sh
-/apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNode.sh ''' + soca_configuration['SchedulerPrivateDnsName'] + ''' >> $SOCA_HOST_SYSTEM_LOG/ComputeNode.sh.log 2>&1'''
+/apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNode.sh ''' + soca_configuration['SchedulerPrivateDnsName'] + ''' >> $SOCA_HOST_SYSTEM_LOG/ComputeNode.sh.log 2>&1
+'''
 
 
-
-    check_hibernation_support = client_ec2.describe_instance_types(
-        InstanceTypes=[instance_type],
-        Filters=[
-            {"Name": "hibernation-supported",
-             "Values": ["true"]}]
-    )
-    logger.info("Checking in {} support Hibernation : {}".format(instance_type, check_hibernation_support))
-    if len(check_hibernation_support["InstanceTypes"]) == 0:
-        if config.Config.DCV_FORCE_INSTANCE_HIBERNATE_SUPPORT is True:
-            flash("Sorry your administrator limited <a href='https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Hibernate.html' target='_blank'>DCV to instances that support hibernation mode</a> <br> Please choose a different type of instance.")
-            return redirect("/remote_desktop")
-        else:
-            hibernate_support = False
-    else:
-        hibernate_support = True
-
-    if parameters["hibernate"] and not hibernate_support:
-        flash("Sorry you have selected {} with hibernation support, but this instance type does not support it. Either disable hibernation support or pick a different instance type".format(instance_type), "error")
-        return redirect("/remote_desktop")
+    if parameters["hibernate"]:
+        try:
+            check_hibernation_support = client_ec2.describe_instance_types(
+                InstanceTypes=[instance_type],
+                Filters=[
+                    {"Name": "hibernation-supported",
+                     "Values": ["true"]}]
+            )
+            logger.info("Checking in {} support Hibernation : {}".format(instance_type, check_hibernation_support))
+            if len(check_hibernation_support["InstanceTypes"]) == 0:
+                if config.Config.DCV_FORCE_INSTANCE_HIBERNATE_SUPPORT is True:
+                    flash("Sorry your administrator limited <a href='https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Hibernate.html' target='_blank'>DCV to instances that support hibernation mode</a> <br> Please choose a different type of instance.")
+                    return redirect("/remote_desktop")
+                else:
+                    flash("Sorry you have selected {} with hibernation support, but this instance type does not support it. Either disable hibernation support or pick a different instance type".format(instance_type), "error")
+                    return redirect("/remote_desktop")
+        except ClientError as e:
+            logger.error(f"Error while checking hibernation support due to {e}")
 
     launch_parameters = {"security_group_id": security_group_id,
                          "instance_profile": instance_profile,
@@ -733,7 +765,8 @@ def generate_client():
 format=1.0
 
 [connect]
-host=''' + read_secretmanager.get_soca_configuration()['LoadBalancerDNSName'] + '''
+host=''' + urlparse(request.host_url).hostname + '''
+#host=''' + read_secretmanager.get_soca_configuration()['LoadBalancerDNSName'] + '''
 port=443
 sessionid='''+check_session.session_id+'''
 user='''+session["user"]+'''

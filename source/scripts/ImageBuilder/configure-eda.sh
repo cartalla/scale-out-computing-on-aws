@@ -1,5 +1,17 @@
 #!/bin/bash -ex
 
+scriptdir=$(dirname $(readlink -f $0))
+
+install_packages=${scriptdir}/install_packages.sh
+
+function info {
+    echo "$(date):INFO: $1"
+}
+
+function error {
+    echo "$(date):ERROR: $1"
+}
+
 yum install -y epel-release
 
 eda_yum_packages=(
@@ -133,14 +145,15 @@ eda_yum_packages=(
 )
 
 eda_pip_packages=(
-    awscli
     boto3
-    pandas
+    # pandas # Doesn't install on python2
     python-hostlist
     virtualenv
 )
 
 eda_pip3_packages=(
+    ${eda_pip_packages[@]}
+    pandas
     requests
 )
 
@@ -149,11 +162,15 @@ eda_npm_packages=(
     typescript
 )
 
-yum install -y $(echo ${eda_yum_packages[*]})
+rc=0
 
-pip2.7 install --upgrade  $(echo ${eda_pip_packages[*]})
-python3 -m pip install --upgrade  $(echo ${eda_pip_packages[*]})
-python3 -m pip install --upgrade  $(echo ${eda_pip3_packages[*]})
+$install_packages "yum list installed" "yum install -y" ${eda_yum_packages[@]}
+
+PIP=pip2.7
+$install_packages "$PIP show" "$PIP install" ${eda_pip_packages[@]}
+
+PIP="python3 -m pip"
+$install_packages "$PIP show" "$PIP install" ${eda_pip3_packages[@]}
 
 npm install $(echo ${eda_npm_packages[*]})
 
@@ -172,4 +189,8 @@ fi
 mkdir -p /root/sem
 touch /root/sem/eda-packages-installed
 
+if [ $rc != "0" ]; then
+    echo "error: Failed"
+    exit $rc
+fi
 echo Passed

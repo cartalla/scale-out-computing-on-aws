@@ -8,71 +8,105 @@ version: 0.2
 env:
   shell: bash
   exported-variables:
+    - build_dir
     - repo_dir
+    - full_repo_dir
+    - required_repos
+    - optional_repos
+    - repos
   git-credential-helper: yes
 
 phases:
   install:
-    commands:
-      - export repo_dir=$(date +%Y-%m-%d-%H-%M-%S)
-      - 'echo repo_dir=${repo_dir}'
-      - mkdir -p $repo_dir
+    commands: |
+      echo "Running install phase"
 
-      - yum -y install yum-utils createrepo groff which
-      - curl https://bootstrap.pypa.io/get-pip.py -o get-pip.py
-      - python get-pip.py
-      - which pip
-      - pip install awscli
-      - ls /etc/pki/rpm-gpg
-      - yum -y install epel-release
-      - ls /etc/pki/rpm-gpg
-      - rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7
-      - rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7
+      set -ex
 
-      - # Copy config and source it
-      - aws s3 cp s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/scripts/config.cfg config.cfg
-      - source config.cfg
+      echo $SHELL
 
-      - yum -y install wget
-      - yum -y install make createrepo rpm-build
-      - pip install mock
+      export build_dir=$(pwd)
+      export repo_dir=$(date +%Y-%m-%d-%H-%M-%S)
+      echo repo_dir=${repo_dir}
+      mkdir -p $repo_dir
+      export full_repo_dir=$build_dir/$repo_dir
 
-      - # Install fsx lustre client
-      - curl https://fsx-lustre-client-repo-public-keys.s3.amazonaws.com/fsx-rpm-public-key.asc -o /tmp/fsx-rpm-public-key.asc
-      - aws s3 cp /tmp/fsx-rpm-public-key.asc s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/yum/aws-fsx/fsx-rpm-public-key.asc
-      - rpm --import /tmp/fsx-rpm-public-key.asc
-      - curl https://fsx-lustre-client-repo.s3.amazonaws.com/el/7/fsx-lustre-client.repo -o /etc/yum.repos.d/aws-fsx.repo
-      - #yum install -y kmod-lustre-client lustre-client
-      - yum --disablerepo="*" --enablerepo="aws-fsx" list available
-      - yum --disablerepo="*" --enablerepo="aws-fsx-src" list available
-      - #yumdownloader --source kmod-lustre-client
+      export centos7_repo_dir=$repo_dir/yum/centos7
+      mkdir -p $centos7_repo_dir
+      
+      yum -y install createrepo epel-release groff make rpm-build wget which yum-utils
 
-      - source config.cfg
-      - # Copy PBSPRO tarball
-      - wget -q $OPENPBS_URL
-      - aws s3 cp $OPENPBS_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/pbspro/$PBSPRO_TGZ
-      - # Copy Python tarball
-      - wget -q $PYTHON_URL
-      - aws s3 cp $PYTHON_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/python/$PYTHON_TGZ
-      - # Copy OpenMPI tarball
-      - wget -q $OPENMPI_URL
-      - aws s3 cp $OPENMPI_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/openmpi/$OPENMPI_TGZ
-      - # Copy Metric Beat tarball
-      - wget -q $METRICBEAT_URL
-      - aws s3 cp $METRICBEAST_RPM s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/metricbeat/$METRICBEAST_RPM
+      yum -y install python2-pip
+      which pip
+      
+      pip install mock
 
-      - aws s3 cp --recursive s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/MirrorRepos/yum-s3-iam s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/yum-s3-iam
-      - aws s3 cp --recursive s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/MirrorRepos/yum-s3-iam yum-s3-iam
-      - cd yum-s3-iam
-      - make test
-      - aws s3 cp /root/rpmbuild/RPMS/noarch/yum-plugin-s3-iam-1.2.2-1.noarch.rpm s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/yum/yum-plugin-s3-iam-1.2.2-1.noarch.rpm
-      - cd ..
+      # Installation failing using pip so get package directly from AWS
+      # Save the zip file for used by private VPCs
+      wget https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip
+      unzip -q awscli-exe-linux-x86_64.zip
+      ./aws/install
+      export PATH=/usr/local/bin:${PATH}
+      aws s3 cp --quiet awscli-exe-linux-x86_64.zip s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/awscli-exe-linux-x86_64.zip
+
+      ls /etc/pki/rpm-gpg
+      rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7
+      rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7
+
+      aws s3 cp --quiet /etc/pki/rpm-gpg/RPM-GPG-KEY-CentOS-7 s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/$centos7_repo_dir/RPM-GPG-KEY-CentOS-7
+      aws s3 cp --quiet /etc/pki/rpm-gpg/RPM-GPG-KEY-EPEL-7   s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/$centos7_repo_dir/RPM-GPG-KEY-EPEL-7
+
+      # Install fsx lustre client
+      curl https://fsx-lustre-client-repo-public-keys.s3.amazonaws.com/fsx-rpm-public-key.asc -o /tmp/fsx-rpm-public-key.asc
+      aws s3 cp --quiet /tmp/fsx-rpm-public-key.asc s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/yum/aws-fsx/fsx-rpm-public-key.asc
+      rpm --import /tmp/fsx-rpm-public-key.asc
+      curl https://fsx-lustre-client-repo.s3.amazonaws.com/el/7/fsx-lustre-client.repo -o /etc/yum.repos.d/aws-fsx.repo
+      #yum install -y kmod-lustre-client lustre-client
+      yum --disablerepo="*" --enablerepo="aws-fsx" list available
+      yum --disablerepo="*" --enablerepo="aws-fsx-src" list available
+      #yumdownloader --source kmod-lustre-client
+
+      # Copy config and source it
+      aws s3 cp --quiet s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/scripts/config.cfg config.cfg
+      source config.cfg
+
+      echo $BASE_OS
+
+      yum install -y $(echo ${SYSTEM_PKGS[*]} ${SCHEDULER_PKGS[*]})
+
+      yum install -y $(echo ${OPENLDAP_SERVER_PKGS[*]} ${SSSD_PKGS[*]})
+
+      # Copy PBSPRO tarball
+      wget -q $OPENPBS_URL
+      aws s3 cp --quiet $OPENPBS_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/openpbs/$OPENPBS_TGZ
+      # Copy Python tarball
+      wget -q $PYTHON_URL
+      if [[ $(md5sum $PYTHON_TGZ | awk '{print $1}') != $PYTHON_HASH ]];  then
+          echo -e "FATAL ERROR: Checksum for Python failed. File may be compromised." > /etc/motd
+          exit 1
+      fi
+      aws s3 cp --quiet $PYTHON_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/python/$PYTHON_TGZ
+      # Copy OpenMPI tarball
+      wget -q $OPENMPI_URL
+      aws s3 cp --quiet $OPENMPI_TGZ s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/openmpi/$OPENMPI_TGZ
+      # Copy Metric Beat tarball
+      wget -q $METRICBEAT_URL
+      aws s3 cp --quiet $METRICBEAST_RPM s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/metricbeat/$METRICBEAST_RPM
+
+      aws s3 cp --quiet --recursive s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/MirrorRepos/yum-s3-iam s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/yum-s3-iam
+      aws s3 cp --quiet --recursive s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/MirrorRepos/yum-s3-iam yum-s3-iam
+      cd yum-s3-iam
+      make rpm || true
+      make test || true
+      aws s3 cp --quiet /root/rpmbuild/RPMS/noarch/yum-plugin-s3-iam-1.2.2-1.noarch.rpm s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/yum/yum-plugin-s3-iam-1.2.2-1.noarch.rpm
+      cd ..
 
     finally:
       - echo "Install phase complete"
       - ls /etc/pki/rpm-gpg
 
       # Sync the intermediate results
+      - cd $build_dir
       - aws s3 sync --quiet $repo_dir s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/$repo_dir
     
   pre_build:
@@ -81,7 +115,7 @@ phases:
       - 'echo "mounts:"'
       - df -h
       - 'echo "Available space in current dir:"'
-      - df -h .
+      - 'date; echo "df -h ."; df -h .'
       - 'echo "List of yum repos:"'
       - yum repolist
       - 'echo "Test aws CLI"'
@@ -89,42 +123,91 @@ phases:
 
     finally:
       - echo "pre_build phase complete"
-      - 'echo repo_dir=${repo_dir}'
+      - |
+        echo "repo_dir=${repo_dir}"
+        echo "test"
 
   build:
     commands: |
       echo "Running build phase"
 
-      mkdir -p $repo_dir/yum/centos7
-      repos=( \
+      set -ex
+
+      source config.cfg
+
+      # Build Python and install required packages
+      # This is so that a PyPi mirror isn't required.
+      mkdir -p /apps/soca/$SOCA_CONFIGURATION/python/installer
+      cd /apps/soca/$SOCA_CONFIGURATION/python/installer
+      tar xzf $build_dir/$PYTHON_TGZ
+      cd Python-$PYTHON_VERSION
+      ./configure LDFLAGS="-L/usr/lib64/openssl" CPPFLAGS="-I/usr/include/openssl" -enable-loadable-sqlite-extensions --prefix=/apps/soca/$SOCA_CONFIGURATION/python/$PYTHON_VERSION
+      make
+      make install
+      cd /apps/soca/$SOCA_CONFIGURATION/python
+      compiled_python_tgz=Python-$PYTHON_VERSION-compiled.tgz
+
+      # Install Python required libraries
+      # Source environment to reload path for Python3
+      aws s3 cp --quiet s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/scripts/requirements.txt /root/
+      /apps/soca/$SOCA_CONFIGURATION/python/$PYTHON_VERSION/bin/pip3 install -r /root/requirements.txt
+
+      compiled_python_tgz=Python-${PYTHON_VERSION}-compiled.tgz
+      tar -czf $compiled_python_tgz $PYTHON_VERSION
+      aws s3 cp --quiet $compiled_python_tgz s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/${repo_dir}/source/python/$compiled_python_tgz
+      cd $build_dir
+
+      export required_repos=( \
           base updates extras centosplus \
-          cr \
-          #base-debuginfo \
-          fasttrack \
-          base-source updates-source extras-source centosplus-source \
-          centos-kernel centos-kernel-experimental \
           epel epel-debuginfo epel-source \
-          epel-testing epel-testing-debuginfo epel-testing-source \
           aws-fsx \
           aws-fsx-src \
       )
+      echo ${required_repos[@]}
+      
+      export optional_repos=( \
+          base-debuginfo \
+          cr \
+          fasttrack \
+          base-source updates-source extras-source centosplus-source \
+          centos-kernel centos-kernel-experimental \
+          epel-testing epel-testing-debuginfo epel-testing-source \
+      )
+      echo ${optional_repos[@]}
+      
+      export repos=( \
+          ${required_repos[@]} \
+          #${optional_repos[@]} \
+      )
+      echo ${repos[@]}
+      
       for repo in ${repos[@]}; do
-          echo -e "\nreposync --quiet -g -l -p $repo_dir/yum/centos7 --source --downloadcomps --download-metadata -r $repo"
-          if ! reposync --quiet -g -l -p $repo_dir/yum/centos7 --source --downloadcomps --download-metadata -r $repo; then
-              rc=$?
-              echo -e "warning: reposync failed with rc=$rc but trying to continue. GPC may have failed on a package."
-          fi
-          if [ -e $repo_dir/yum/centos7/$repo/comps.xml ]; then
+        date
+        echo -e "\nreposync --quiet -g -l -p $centos7_repo_dir --source --downloadcomps --download-metadata -r $repo"
+        if ! reposync --quiet -g -l -p $centos7_repo_dir --source --downloadcomps --download-metadata -r $repo; then
+            rc=$?
+            echo -e "warning: reposync failed with rc=$rc but trying to continue. GPC may have failed on a package."''
+        fi
+        date; echo "df -h ."; df -h .
+        if [ -e $centos7_repo_dir/$repo/comps.xml ]; then
             groups_arg="-g comps.xml"
-          else
+        else
             groups_arg=""
-          fi
-          echo -e "\ncreaterepo $repo_dir/yum/centos7/$repo $groups_arg"
-          createrepo $repo_dir/yum/centos7/$repo $groups_arg
+        fi
+        
+        echo -e "\ncreaterepo $centos7_repo_dir/$repo $groups_arg"
+        createrepo $centos7_repo_dir/$repo $groups_arg
+        date; echo "df -h ."; df -h .
+        echo "aws s3 sync --quiet $centos7_repo_dir/$repo s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/$centos7_repo_dir/$repo"
+        aws s3 sync --quiet $centos7_repo_dir/$repo s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/$centos7_repo_dir/$repo
+        #echo "rm -rf $centos7_repo_dir/$repo"
+        #rm -rf $centos7_repo_dir/$repo
+        #date; echo "df -h ."; df -h .
       done
 
     finally:
       - echo "build phase complete"
+      - set -x
       - aws s3 sync --quiet $repo_dir s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/$repo_dir
       - 'echo repo_dir=${repo_dir}'
 

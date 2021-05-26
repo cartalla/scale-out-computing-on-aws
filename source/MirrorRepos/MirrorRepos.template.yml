@@ -71,7 +71,7 @@ Resources:
       Environment:
           Type: LINUX_CONTAINER
           Image: centos:centos7
-          ComputeType: BUILD_GENERAL1_MEDIUM
+          ComputeType: BUILD_GENERAL1_LARGE
           EnvironmentVariables: 
             - Name: S3_MIRROR_REPO_BUCKET
               Value: !Ref S3MirrorRepoBucket
@@ -81,7 +81,7 @@ Resources:
       Artifacts:
           Type: NO_ARTIFACTS
       ServiceRole: !Ref CodeBuildRole
-      TimeoutInMinutes: 60
+      TimeoutInMinutes: 480
 
   #============================================================================
   # Lambda to manually kick off a build

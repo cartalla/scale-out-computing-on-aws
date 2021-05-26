@@ -14,14 +14,16 @@ function info {
 }
 
 function error {
-    echo "$(date):INFO: $1"
+    echo "$(date):ERROR: $1"
 }
 
 info "Starting $0"
 
 source /etc/environment
 source /root/config.cfg
-source /etc/profile.d/proxy.sh
+if [ -e /etc/profile.d/proxy.sh ]; then
+    source /etc/profile.d/proxy.sh
+fi
 
 cd /root
 
@@ -33,7 +35,11 @@ PROCESS_COUNT_TO_TRACK=15 # how many process do you want to return on the web ui
 if [[ $SOCA_SYSTEM_METRICS == "true" ]];
 then
   echo "Installing and configuring MetricBeat"
-  wget $METRICBEAT_URL
+  if [ ":${SOCA_REPOSITORY_BUCKET}" != ":" ] && [ ":${SOCA_REPOSITORY_FOLDER}" != ":" ]; then
+          aws s3 cp s3://${SOCA_REPOSITORY_BUCKET}/${SOCA_REPOSITORY_FOLDER}/source/metricbeat/${METRICBEAST_RPM} .
+  else
+    wget $METRICBEAT_URL
+  fi
   if [[ $(md5sum $METRICBEAST_RPM | awk '{print $1}') != $METRICBEAT_HASH ]];  then
     echo -e "FATAL ERROR: Checksum for metricbeat failed. File may be compromised."
     exit 1

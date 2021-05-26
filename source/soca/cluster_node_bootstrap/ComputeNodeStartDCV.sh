@@ -12,14 +12,14 @@ function info {
 }
 
 function error {
-    echo "$(date):INFO: $1"
+    echo "$(date):ERROR: $1"
 }
 
 info "Starting $0"
 
 source /etc/environment
 source /root/config.cfg
-if [ -e /etc/profile.d/profile ]; then
+if [ -e /etc/profile.d/proxy.sh ]; then
     source /etc/profile.d/proxy.sh
 fi
 
@@ -58,6 +58,7 @@ IDLE_TIMEOUT=1440 # in minutes. Disconnect DCV (but not terminate the session) a
 USER_HOME=$(eval echo ~$SOCA_DCV_OWNER)
 DCV_STORAGE_ROOT="$USER_HOME/storage-root" # Create the storage root location if needed
 mkdir -p $DCV_STORAGE_ROOT
+chown $SOCA_DCV_OWNER:$SOCA_DCV_OWNER $USER_HOME
 chown $SOCA_DCV_OWNER:$SOCA_DCV_OWNER $DCV_STORAGE_ROOT
 
 DCV_HOST_ALTNAME=$(hostname | cut -d. -f1)

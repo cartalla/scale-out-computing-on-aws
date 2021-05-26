@@ -13,12 +13,16 @@ endif
 
 template_url = https://${S3_MIRROR_REPO_BUCKET}.s3.amazonaws.com/${S3_MIRROR_REPO_FOLDER}/source/MirrorRepos/MirrorRepos.template.yml
 
+.PHONY: upload create create_only update update_only
+
 upload:
 	aws s3 cp --recursive .             s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/MirrorRepos/
 	aws s3 cp --recursive ../scripts    s3://${S3_MIRROR_REPO_BUCKET}/${S3_MIRROR_REPO_FOLDER}/source/scripts
 	@echo "CloudFormation template: ${template_url}"
 
-create:
+create: upload create_only
+
+create: create_only
 	aws cloudformation create-stack --stack-name ${STACK_NAME} \
 	--template-url ${template_url} \
 	--parameters \
@@ -27,7 +31,9 @@ create:
 	--disable-rollback \
 	--capabilities CAPABILITY_IAM
 
-update:
+update: upload update_only
+
+update_only: upload
 	aws cloudformation update-stack --stack-name ${STACK_NAME} \
 	--template-url ${template_url} \
 	--parameters \

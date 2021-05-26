@@ -46,7 +46,7 @@ def can_launch_instance(launch_parameters):
                     'Ebs': {
                         'DeleteOnTermination': True,
                         'VolumeSize': 30 if launch_parameters["disk_size"] is False else int(launch_parameters["disk_size"]),
-                        'VolumeType': 'gp2',
+                        'VolumeType': 'gp3',
                         'Encrypted': True
                     },
                 },
@@ -319,32 +319,36 @@ def create():
     user_data = user_data.replace("%SOCA_LoadBalancerDNSName%", soca_configuration['LoadBalancerDNSName'])
     user_data = user_data.replace("%SOCA_LOCAL_USER%", session["user"])
 
+    # required for EBS tagging
+    user_data = user_data.replace("%SOCA_JOB_ID%", str(session_name))
+    user_data = user_data.replace("%SOCA_JOB_OWNER%", session["user"])
+    user_data = user_data.replace("%SOCA_JOB_PROJECT%", "dcv")
+
+
     if config.Config.DCV_WINDOWS_AUTOLOGON is True:
         user_data = user_data.replace("%SOCA_WINDOWS_AUTOLOGON%", "true")
     else:
         user_data = user_data.replace("%SOCA_WINDOWS_AUTOLOGON%", "false")
 
+    if parameters["hibernate"]:
+        try:
+            check_hibernation_support = client_ec2.describe_instance_types(
+                InstanceTypes=[instance_type],
+                Filters=[
+                    {"Name": "hibernation-supported",
+                     "Values": ["true"]}]
+            )
+            logger.info("Checking in {} support Hibernation : {}".format(instance_type, check_hibernation_support))
+            if len(check_hibernation_support["InstanceTypes"]) == 0:
+                if config.Config.DCV_FORCE_INSTANCE_HIBERNATE_SUPPORT is True:
+                    flash("Sorry your administrator limited <a href='https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/Hibernate.html#hibernating-prerequisites' target='_blank'>DCV to instances that support hibernation mode</a> <br> Please choose a different type of instance.")
+                    return redirect("/remote_desktop_windows")
+                else:
+                    flash("Sorry you have selected {} with hibernation support, but this instance type does not support it. Either disable hibernation support or pick a different instance type".format(instance_type), "error")
+                    return redirect("/remote_desktop_windows")
+        except ClientError as e:
+                    logger.error(f"Error while checking hibernation support due to {e}")
 
-
-    check_hibernation_support = client_ec2.describe_instance_types(
-        InstanceTypes=[instance_type],
-        Filters=[
-            {"Name": "hibernation-supported",
-             "Values": ["true"]}]
-    )
-    logger.info("Checking in {} support Hibernation : {}".format(instance_type, check_hibernation_support))
-    if len(check_hibernation_support["InstanceTypes"]) == 0:
-        if config.Config.DCV_FORCE_INSTANCE_HIBERNATE_SUPPORT is True:
-            flash("Sorry your administrator limited <a href='https://docs.aws.amazon.com/AWSEC2/latest/WindowsGuide/Hibernate.html#hibernating-prerequisites' target='_blank'>DCV to instances that support hibernation mode</a> <br> Please choose a different type of instance.")
-            return redirect("/remote_desktop_windows")
-        else:
-            hibernate_support = False
-    else:
-        hibernate_support = True
-
-    if parameters["hibernate"] and not hibernate_support:
-        flash("Sorry you have selected {} with hibernation support, but this instance type does not support it. Either disable hibernation support or pick a different instance type".format(instance_type), "error")
-        return redirect("/remote_desktop_windows")
 
     launch_parameters = {"security_group_id": security_group_id,
                          "instance_profile": instance_profile,

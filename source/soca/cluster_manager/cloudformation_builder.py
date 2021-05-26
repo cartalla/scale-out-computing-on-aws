@@ -52,7 +52,7 @@ def main(**params):
         # Metadata
         t = Template()
         t.set_version("2010-09-09")
-        t.set_description("(SOCA) - Base template to deploy compute nodes. Version 2.6.0")
+        t.set_description("(SOCA) - Base template to deploy compute nodes. Version 2.6.1")
         allow_anonymous_data_collection = params["MetricCollectionAnonymous"]
         debug = False
         mip_usage = False
@@ -65,12 +65,32 @@ def main(**params):
         # Begin LaunchTemplateData
         UserData = '''#!/bin/bash -ex
 
-# Configure the proxy
-value="''' + params['ProxyCACert'] + '''"
-echo $value >  /etc/pki/ca-trust/source/anchors/proxyCA.pem
-update-ca-trust
+# Handle errors
+function on_exit {
+    rc=$?
+    set +e
+    if [[ $rc -ne 0 ]]; then
+        echo "UserData failed"
+        # aws sns publish --topic-arn ${ErrorSnsTopicArn} --subject "${ClusterId} Proxy UserData failed" --message "See /var/log/cloud-init.log or grep cloud-init /var/log/messages | less for more info."
+    fi
+}
+trap on_exit EXIT
 
-cat <<EOF > /etc/profile.d/proxy.sh
+touch /root/patch-hold
+
+publicVpc=''' + params['PublicVpc'] + '''
+if [ $publicVpc == "true" ]; then
+    # Configure the proxy
+    # Can't get ProxyCACert from ssm because it requires awscli which requires yum to be configured to use proxy.
+    # Get ProxyCACert from secrets
+    parameter_name="''' + params['ProxyCACertParameterName'] + '''"
+    target=/etc/pki/ca-trust/source/anchors/proxyCA.pem
+    #aws --region {{Region}} ssm get-parameter --name $parameter_name --query 'Parameter.Value' --output text > $target
+    value="''' + params['ProxyCACert'] + '''"
+    echo "''' + params['ProxyCACert'] + '''" >  $target
+    update-ca-trust
+
+    cat <<EOF > /etc/profile.d/proxy.sh
 proxy_url="http://''' + params['ProxyPrivateDnsName'] + ''':3128/"
 
 export HTTP_PROXY=\$proxy_url
@@ -88,12 +108,13 @@ export no_proxy=\$NO_PROXY
 export REQUESTS_CA_BUNDLE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 EOF
 
-source /etc/profile.d/proxy.sh
+    source /etc/profile.d/proxy.sh
 
-cat <<EOF > /etc/yum.repos.d/10_proxy.conf
+    cat <<EOF > /etc/yum.repos.d/10_proxy.conf
 [main]
 proxy=http://''' + params['ProxyPrivateDnsName'] + ''':3128/
 EOF
+fi
 
 if grep -q 'Amazon Linux release 2' /etc/system-release; then
     BASE_OS=amazonlinux2
@@ -122,7 +143,8 @@ fi
 # The playbooks are downloaded from S3 using the S3 VPC endpoint so don't require the proxy.
 if ! yum list installed ansible &> /dev/null; then
     if [ $BASE_OS == "amazonlinux2" ]; then
-        amazon-linux-extras install -y ansible2
+        amazon-linux-extras enable ansible2
+        yum -y install ansible
     else
         if ! yum list installed epel-release &> /dev/null; then
             yum -y install epel-release
@@ -132,7 +154,9 @@ if ! yum list installed ansible &> /dev/null; then
 fi
 aws s3 cp --recursive s3://''' + params['S3Bucket'] + '''/''' + params['S3InstallFolder'] + '''/playbooks/ /root/playbooks/
 cd /root/playbooks
-ansible-playbook computeNode.yml -e Region=''' + params['Region'] + ''' -e Domain=''' + params['SocaDomain'] + ''' -e S3InstallBucket=''' + params['S3Bucket'] + ''' -e S3InstallFolder=''' + params['S3InstallFolder'] + ''' -e ClusterId=''' + params['ClusterId'] + ''' -e NoProxy=''' + params['NoProxy'] + ''' -e NodeType=''' + params['NodeType'] + ''' >> /root/ansible.log 2>&1
+export SOCA_REPOSITORY_BUCKET="''' + str(params['RepositoryBucket']) + '''"
+export SOCA_REPOSITORY_FOLDER="''' + str(params['RepositoryFolder']) + '''"
+ansible-playbook /root/playbooks/computeNode.yml -e Region=''' + params['Region'] + ''' -e RepositoryBucket=$SOCA_REPOSITORY_BUCKET -e RepositoryFolder=$SOCA_REPOSITORY_FOLDER -e Domain=''' + params['SocaLocalDomain'] + ''' -e S3InstallBucket=''' + params['S3Bucket'] + ''' -e S3InstallFolder=''' + params['S3InstallFolder'] + ''' -e ClusterId=''' + params['ClusterId'] + ''' -e PublicVpc=''' + params['PublicVpc'] + ''' -e ProxyCACertParameterName=''' params['ProxyCACertParameterName'] + ''' -e NoProxy=''' + params['NoProxy'] + ''' -e NodeType=''' + params['NodeType'] + ''' >> /root/ansible.log 2>&1
 
 if [[ "$BASE_OS" == "centos7" ]] || [[ "$BASE_OS" == "rhel7" ]];
 then
@@ -163,6 +187,8 @@ echo export "SOCA_INSTANCE_TYPE=$GET_INSTANCE_TYPE" >> /etc/environment
 echo export "SOCA_INSTANCE_HYPERTHREADING="''' + str(params['ThreadsPerCore']).lower() + '''"" >> /etc/environment
 echo export "SOCA_SYSTEM_METRICS="''' + str(params['SystemMetrics']).lower() + '''"" >> /etc/environment
 echo export "SOCA_ESDOMAIN_ENDPOINT="''' + str(params['ESDomainEndpoint']).lower() + '''"" >> /etc/environment
+echo export "SOCA_REPOSITORY_BUCKET=${!SOCA_REPOSITORY_BUCKET}" >> /etc/environment
+echo export "SOCA_REPOSITORY_FOLDER=${!SOCA_REPOSITORY_FOLDER}" >> /etc/environment
 
 
 echo export "SOCA_HOST_SYSTEM_LOG="/apps/soca/''' + str(params['ClusterId']) + '''/cluster_node_bootstrap/logs/''' + str(params['JobId']) + '''/$(hostname -s)"" >> /etc/environment
@@ -176,22 +202,29 @@ AWS=$(which aws)
 # Give yum permission to the user on this specific machine
 echo "''' + params['JobOwner'] + ''' ALL=(ALL) /bin/yum" >> /etc/sudoers
 
-mkdir -p /apps
-mkdir -p /data
-
 # Mount EFS
-echo "''' + params['EFSDataDns'] + ''':/ /data nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
-echo "''' + params['EFSAppsDns'] + ''':/ /apps nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
-EFS_MOUNT=0
-mount -a 
-while [[ $? -ne 0 ]] && [[ $EFS_MOUNT -lt 5 ]]
-  do
-    SLEEP_TIME=$(( RANDOM % 60 ))
-    echo "Failed to mount EFS, retrying in $SLEEP_TIME seconds and Loop $EFS_MOUNT/5..."
-    sleep $SLEEP_TIME
-    ((EFS_MOUNT++))
-    mount -a
-  done
+if [ ! -d /data ]; then
+    mkdir -p /data
+fi
+EFS_DATA=''' + params['EFSDataDns'] + '''
+if ! grep "$EFS_DATA:/ /data/ " /etc/fstab; then
+    echo "$EFS_DATA:/ /data/ nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
+fi
+if ! findmnt -m /data; then
+    mount /data
+fi
+if [ ! -d /apps ]; then
+    mkdir -p /apps
+fi
+EFS_APPS= ''' + params['EFSAppsDns'] + '''
+if ! grep "$EFS_APPS:/ /apps " /etc/fstab; then
+    echo "$EFS_APPS:/ /apps nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,noresvport 0 0" >> /etc/fstab
+fi
+if ! findmnt -m /apps; then
+    mount /apps
+fi
+# mount -a fails if /etc/fstab includes lustre mounts that have already been mounted.
+#mount -a
 
 # Configure Chrony
 yum remove -y ntp
@@ -232,7 +265,8 @@ chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodePostRe
 echo "@reboot /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodePostReboot.sh >> $SOCA_HOST_SYSTEM_LOG/ComputeNodePostReboot.log 2>&1" | crontab -
 $AWS s3 cp s3://$SOCA_INSTALL_BUCKET/$SOCA_INSTALL_BUCKET_FOLDER/scripts/config.cfg /root/
 chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNode.sh
-/apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNode.sh ''' + params['SchedulerHostname'] + ''' >> $SOCA_HOST_SYSTEM_LOG/ComputeNode.sh.log 2>&1'''
+/apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNode.sh ''' + params['SchedulerHostname'] + ''' >> $SOCA_HOST_SYSTEM_LOG/ComputeNode.sh.log 2>&1
+'''
 
         SpotFleet = True if ((params["SpotPrice"] is not False) and (int(params["DesiredCapacity"]) > 1 or len(instances_list)>1)) else False
         ltd.EbsOptimized = True
@@ -273,7 +307,7 @@ chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNode.sh
                 DeviceName="/dev/xvda" if params["BaseOS"] == "amazonlinux2" else "/dev/sda1",
                 Ebs=EBSBlockDevice(
                     VolumeSize=params["RootSize"],
-                    VolumeType="gp2",
+                    VolumeType="gp3",
                     DeleteOnTermination="false" if params["KeepEbs"] is True else "true",
                     Encrypted=True))
         ]
@@ -283,7 +317,7 @@ chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNode.sh
                     DeviceName="/dev/xvdbx",
                     Ebs=EBSBlockDevice(
                         VolumeSize=params["ScratchSize"],
-                        VolumeType="io1" if int(params["VolumeTypeIops"]) > 0 else "gp2",
+                        VolumeType="io1" if int(params["VolumeTypeIops"]) > 0 else "gp3",
                         Iops=params["VolumeTypeIops"] if int(params["VolumeTypeIops"]) > 0 else Ref("AWS::NoValue"),
                         DeleteOnTermination="false" if params["KeepEbs"] is True else "true",
                         Encrypted=True))

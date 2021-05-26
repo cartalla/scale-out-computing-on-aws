@@ -4,6 +4,7 @@
   become_user: root
   become: yes
   roles:
+    - configure-repo-mirror
     - common
     - proxy
 

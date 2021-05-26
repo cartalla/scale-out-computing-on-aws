@@ -10,7 +10,6 @@ function on_exit {
 }
 trap on_exit EXIT
 
-parameter_name="/{{ClusterId}}/proxy/cacert"
-proxyCACert=$(aws --region {{Region}} ssm get-parameter --name $parameter_name --query 'Parameter.Value' --output text)
-echo $proxyCACert > $target
+parameter_name="{{ProxyCACertParameterName}}"
+aws --region {{Region}} ssm get-parameter --name $parameter_name --query 'Parameter.Value' --output text > $target
 update-ca-trust

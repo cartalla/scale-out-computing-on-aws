@@ -1,20 +1,32 @@
 #!/bin/bash -xe
 
-if [ $# -lt 4 ]
+# Notify user of errors
+function on_exit {
+    rc=$?
+    set +e
+    if [[ $rc -ne 0 ]]; then
+        aws sns publish --topic-arn ${ErrorSnsTopicArn} --subject "${ClusterId} SchedulerPostReboot.sh failed" --message "See root/PostRebootConfig.log for more info."
+    fi
+}
+trap on_exit EXIT
+
+if [ $# -lt 5 ]
   then
-    echo "usage: $0 S3Bucket S3InstallFolder UserName UserPassword"
+    echo "usage: $0 S3Bucket S3InstallFolder UserName UserPassword ErrorSnsTopicArn"
     exit 1
 fi
 
+sanitized_username="$3"
+set +x
+sanitized_password="$4"
+set -x
+ErrorSnsTopicArn=$5
+
 source /etc/environment
 source /root/config.cfg
-source /etc/profile.d/proxy.sh
-
-# Signal Cloudformation if the instance creates successfully or not
-function on_exit {
-    /opt/aws/bin/cfn-signal -e $? --stack ${SOCA_CLOUDFORMATION_STACK} --resource SchedulerEC2Host --region ${AWS_DEFAULT_REGION} || true
-}
-trap on_exit EXIT
+if [ -e /etc/profile.d/proxy.sh ]; then
+    source /etc/profile.d/proxy.sh
+fi
 
 function info {
     echo "INFO: $(date +'%m/%d/%Y %H:%M:%S'): $1"
@@ -24,6 +36,10 @@ function error {
     echo "ERROR: $(date +'%m/%d/%Y %H:%M:%S'): $1"
 }
 
+if [ -e /apps/soca/$SOCA_CONFIGURATION/cluster_web_ui/socawebui.sh ]; then
+    /apps/soca/$SOCA_CONFIGURATION/cluster_web_ui/socawebui.sh stop
+fi
+
 # First flush the current crontab to prevent this script from running on the next reboot
 crontab -r || true
 
@@ -32,7 +48,7 @@ AWS=$(which aws)
 # Retrieve SOCA configuration under soca.tar.gz and extract it on /apps/
 $AWS s3 cp s3://$SOCA_INSTALL_BUCKET/$SOCA_INSTALL_BUCKET_FOLDER/soca.tar.gz /root
 mkdir -p /apps/soca/$SOCA_CONFIGURATION
-tar -xvf /root/soca.tar.gz -C /apps/soca/$SOCA_CONFIGURATION --no-same-owner
+tar -xf /root/soca.tar.gz -C /apps/soca/$SOCA_CONFIGURATION --no-same-owner
 
 mkdir -p /apps/soca/$SOCA_CONFIGURATION/cluster_manager/logs
 chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_manager/aligoqstat.py
@@ -182,19 +198,10 @@ echo "
 
 # Start Web UI
 chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_web_ui/socawebui.sh
-/apps/soca/$SOCA_CONFIGURATION/cluster_web_ui/socawebui.sh stop
 /apps/soca/$SOCA_CONFIGURATION/cluster_web_ui/socawebui.sh start
 
 # Re-enable access
-if [ "$SOCA_BASE_OS" == "amazonlinux2" ] || [ "$SOCA_BASE_OS" == "rhel7" ];
-     then
-     usermod --shell /bin/bash ec2-user
-fi
-
-if [ "$SOCA_BASE_OS" == "centos7" ];
-     then
-     usermod --shell /bin/bash centos
-fi
+usermod --shell /bin/bash ec2-user
 
 # Check if the Cluster is fully operational
 
@@ -243,15 +250,11 @@ if [ -z "$(pgrep sssd)" ]
 fi
 
 # Cluster is ready
-amazon-linux-extras install -y epel
 yum -y install figlet
 figlet -f slant "SOCA Scheduler" > /etc/motd
 echo -e "Cluster: $SOCA_CONFIGURATION
 > source /etc/environment to load SOCA paths
 " >> /etc/motd
-
-# Signal CloudFormation to continue
-/opt/aws/bin/cfn-signal -e 0 --stack ${SOCA_CLOUDFORMATION_STACK} --resource SchedulerEC2Host --region ${AWS_DEFAULT_REGION} || true
 
 # Move this last because it depends on the Configuration stack which is deployed last.
 if [ ! -e /var/lib/cloud/instance/sem/user_created ]; then
@@ -260,33 +263,35 @@ if [ ! -e /var/lib/cloud/instance/sem/user_created ]; then
   CURRENT_ATTEMPT=0
   # Create default LDAP user
 
-  sanitized_username="$3"
-  sanitized_password="$4"
-
-  if ! id [ ! sanitized_username; then
-    until `/apps/soca/$SOCA_CONFIGURATION/python/latest/bin/python3 /apps/soca/$SOCA_CONFIGURATION/cluster_manager/ldap_manager.py add-user -u $sanitized_username -p $sanitized_password --admin >> /dev/null 2>&1`
-    do
+  until id $sanitized_username; do
+    if /apps/soca/$SOCA_CONFIGURATION/python/latest/bin/python3 /apps/soca/$SOCA_CONFIGURATION/cluster_manager/ldap_manager.py add-user -u $sanitized_username -p $sanitized_password --admin; then
+      info "Added $sanitized_username"
+    else
       info "Unable to add new LDAP user as command failed (secret manager not ready?) Waiting 3 minutes ..."
       if [[ $CURRENT_ATTEMPT -ge $MAX_ATTEMPT ]];
       then
-        error "Unable to create LDAP user after 5 attempts, try to run the command manually: /apps/soca/$SOCA_CONFIGURATION/python/latest/bin/python3 /apps/soca/$SOCA_CONFIGURATION/cluster_manager/ldap_manager.py add-user -u '$3' -p '$4' --admin"
+        error "Unable to create LDAP user after 5 attempts, try to run the command manually: /apps/soca/$SOCA_CONFIGURATION/python/latest/bin/python3 /apps/soca/$SOCA_CONFIGURATION/cluster_manager/ldap_manager.py add-user -u '$sanitized_username' -p '$sanitized_password' --admin"
         exit 1
       fi
       sleep 180
       ((CURRENT_ATTEMPT=CURRENT_ATTEMPT+1))
-    done
-  fi
+    fi
+  done
 
   touch /var/lib/cloud/instance/sem/user_created
 fi
 
 if [ ! -e /var/lib/cloud/instance/sem/open_mpi_installed ]; then
-# Install OpenMPI
+info "Install OpenMPI"
 # This will take a while and is not system blocking, so adding at the end of the install process
 mkdir -p /apps/soca/$SOCA_CONFIGURATION/openmpi/installer
 cd /apps/soca/$SOCA_CONFIGURATION/openmpi/installer
 
-wget $OPENMPI_URL
+if [ ":${SOCA_REPOSITORY_BUCKET}" != ":" ] && [ ":${SOCA_REPOSITORY_FOLDER}" != ":" ]; then
+        aws s3 cp s3://${SOCA_REPOSITORY_BUCKET}/${SOCA_REPOSITORY_FOLDER}/source/openmpi/${OPENMPI_TGZ} .
+else
+    wget $OPENMPI_URL
+fi
 if [[ $(md5sum $OPENMPI_TGZ | awk '{print $1}') != $OPENMPI_HASH ]];  then
     echo -e "FATAL ERROR: Checksum for OpenMPI failed. File may be compromised." > /etc/motd
     exit 1
@@ -298,11 +303,15 @@ cd openmpi-$OPENMPI_VERSION
 make
 make install
 
+  info "OpenMPI installed"
   touch /var/lib/cloud/instance/sem/open_mpi_installed
 fi
 
 # Clean directories
+# Do this at the end once everything is successful
 rm -rf /root/pbspro-18.1.4*
 # Don't remove these so can rerun scripts if necessary
 #rm -rf /root/*.sh
 #rm -rf /root/config.cfg
+
+rm -f /root/patch-hold

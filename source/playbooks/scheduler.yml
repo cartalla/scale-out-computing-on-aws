@@ -4,7 +4,8 @@
   become_user: root
   become: yes
   roles:
-    - proxied
     - configure-repo-mirror
+    - proxied
     - common
+    - mount-efs
     - scheduler

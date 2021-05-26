@@ -1,10 +1,9 @@
 AWSTemplateFormatVersion: 2010-09-09
-Description: (SO0072) - Scale-Out Computing on AWS. Template version 2.6.0
+Description: (SO0072) - Scale-Out Computing on AWS. Template version 2.6.1
 Metadata:
   AWS::CloudFormation::Interface:
     ParameterGroups:
-      -
-        Label:
+      - Label:
             default: Install Location
         Parameters:
           - S3InstallBucket
@@ -19,13 +18,9 @@ Metadata:
           - ProxyInstanceType
           - SchedulerInstanceType
           - LdapInstanceType
-          - CreateSOCAAMI
-          - CreateSOCADesktopAMI
-          - CreateEDAAMI
-          - CreateEDADesktopAMI
 
       - Label:
-          default: Compute Node Linux Distribution
+          default: Default Compute Node Linux Distribution
         Parameters:
           - BaseOS
           - CustomAMI
@@ -34,9 +29,11 @@ Metadata:
           default: Network and Security
         Parameters:
           - VpcCidr
+          - PublicVpc
           - ClientIp
           - PrefixListId
           - SSHKeyPair
+          - SocaLocalDomain
 
       - Label:
           default: Default LDAP user
@@ -44,9 +41,16 @@ Metadata:
           - UserName
           - UserPassword
 
+      - Label:
+          default: Error handling
+        Parameters:
+          - ErrorSnsTopicEmail
+
     ParameterLabels:
       VpcCidr:
         default: Create your new VPC
+      PublicVpc:
+        default: PublicVpc
       ClientIp:
         default: Which IP addresses should have access?
       PrefixListId:
@@ -55,6 +59,8 @@ Metadata:
         default: (Optional) Custom default AMI for Compute Nodes
       SSHKeyPair:
         default: What's your SSH keypair?
+      SocaLocalDomain:
+        default: SocaLocalDomain
       RepositoryBucket:
         default: S3 Bucket with yum repository and other SOCA code
       RepositoryFolder:
@@ -77,6 +83,8 @@ Metadata:
         default: Username for your default LDAP user
       UserPassword:
         default: Password for your default LDAP user
+      ErrorSnsTopicEmail:
+        default: Optional email address that will be notified by SNS about deployment errors. If provided the SNS topic will automatically be subscribed but you will have to confirm the subscription before getting emails.
 
 Parameters:
   CustomAMI:
@@ -96,7 +104,7 @@ Parameters:
       "rhel7",
       "amazonlinux2",
     ]
-    "Default": "amazonlinux2"
+    "Default": "centos7"
     "Description": IMPORTANT CENTOS USERS > You MUST subscribe to https://aws.amazon.com/marketplace/pp/B00O7WM7QW first if using CentOS
 
   VpcCidr:
@@ -105,6 +113,13 @@ Parameters:
     Description: Choose the Cidr block (/16 down to /24) you want to use for your VPC (eg 10.0.0.0/16 down to 10.0.0.0/24)
     AllowedPattern: '((\d{1,3})\.){3}\d{1,3}/(1[6-9]|2[0-4])'
     ConstraintDescription: Your VPC must use x.x.x.x/16 - x.x.x.x/24 CIDR range
+
+  PublicVpc:
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
 
   ClientIp:
     Type: String
@@ -124,6 +139,11 @@ Parameters:
     Type: AWS::EC2::KeyPair::KeyName
     Description: Default SSH pem keys used to SSH into the scheduler
 
+  SocaLocalDomain:
+    Type: String
+    Description: Domain name for Route53 local zone that is used for local DNS entries.
+    Default: 'soca.local'
+  
   RepositoryBucket:
     Default: ""
     Type: String
@@ -175,6 +195,10 @@ Parameters:
     Description: "5 characters minimum. Must start with a letter. Special chars accepted: !#@+_^{}[]()"
     ConstraintDescription: "5 characters minimum. Must start with a letter. Special chars accepted: !#@+_^{}[]()"
 
+  ErrorSnsTopicEmail:
+    Type: String
+    Default: ""
+
 Mappings:
   Send:
     AnonymousUsage:
@@ -183,88 +207,99 @@ Mappings:
   Info:
     Data:
       ClusterIdPrefix: soca
-      Version: 2.6.0
+      Version: 2.6.1
     User:
       centos7: centos
       amazonlinux2: ec2-user
       rhel7: ec2-user
 
   RegionMap:
-    ap-east-1: # Hong Kong
+    af-south-1:
+      amazonlinux2: ami-0c6e605ab94c1af57
+      centos7: ami-0b761332115c38669
+    ap-east-1:
+      amazonlinux2: ami-d60844a7
+      centos7: ami-09611bd6fa5dd0e3d
       rhel7: ami-1a453e6b
-      centos7: ami-68e59c19
-      amazonlinux2: ami-570c7726
-    ap-northeast-1: # Tokyo
-      rhel7: ami-00b95502a4d51a07e
-      centos7: ami-045f38c93733dd48d
-      amazonlinux2: ami-0c3fd0f5d33134a76
-    ap-northeast-2: # Seoul
-      rhel7: ami-041b16ca28f036753
-      centos7: ami-06cf2a72dadf92410
-      amazonlinux2: ami-095ca789e0549777d
-    ap-south-1: # Mumbai
-      rhel7: ami-0963937a03c01ecd4
-      centos7: ami-02e60be79e78fef21
-      amazonlinux2: ami-0d2692b6acea72ee6
-    ap-southeast-1: # Singapore
-      rhel7: ami-055c55112e25b1f1f
-      centos7: ami-0b4dd9d65556cac22
-      amazonlinux2: ami-01f7527546b557442
-    ap-southeast-2: # Sydney
-      rhel7: ami-036b423b657376f5b
-      centos7: ami-08bd00d7713a39e7d
-      amazonlinux2: ami-0dc96254d5535925f
-    ca-central-1: # Canada
-      rhel7: ami-06ca3c0058d0275b3
-      centos7: ami-033e6106180a626d0
-      amazonlinux2: ami-0d4ae09ec9361d8ac
-    eu-central-1: # Frankfurt
-      rhel7: ami-09de4a4c670389e4b
-      centos7: ami-04cf43aca3e6f3de3
-      amazonlinux2: ami-0cc293023f983ed53
-    eu-north-1: # Stockholm
-      rhel7: ami-66f67f18
-      centos7: ami-5ee66f20
-      amazonlinux2: ami-3f36be41
-    eu-west-1: # Dublin
-      rhel7: ami-0202869bdd0fc8c75
-      centos7: ami-0ff760d16d9497662
-      amazonlinux2: ami-0bbc25e23a7640b9b
-    eu-west-2: # London
-      rhel7: ami-0188c0c5eddd2d032
-      centos7: ami-0eab3a90fc693af19
-      amazonlinux2: ami-0d8e27447ec2c8410
-    eu-west-3: # Paris
-      rhel7: ami-0c4224e392ec4e440
-      centos7: ami-0e1ab783dc9489f34
-      amazonlinux2: ami-0adcddd3324248c4c
-    me-south-1: # Bahrain
-      rhel7: AMI_NOT_ADDED_YET # /todo Update AMI ID when available
-      centos7: ami-08529c51dbe004acb
-      amazonlinux2: ami-0624cbc1598d12691
-    us-east-1: # Virginia
-      rhel7: ami-000db10762d0c4c05
-      centos7: ami-02eac2c0129f6376b
-      amazonlinux2: ami-0b898040803850657
-    us-east-2: # Ohio
-      rhel7: ami-094720ddca649952f
-      centos7: ami-0f2b4fc905b0bd1f1
-      amazonlinux2: ami-0d8f6eb4f641ef691
-    us-west-1: # Northern California
-      rhel7: ami-04642fc8fca1e8e67
-      centos7: ami-074e2d6769f445be5
-      amazonlinux2: ami-056ee704806822732
-    us-west-2: # Oregon
-      rhel7: ami-036affea69a1101c9
-      centos7: ami-01ed306a12b7d1c96
-      amazonlinux2: ami-082b5a644766e0e6f
-    sa-east-1: # Sao Paulo
-      rhel7: ami-05c1c16cac05a7c0b
-      centos7: ami-0b8d86d4bf91850af
-      amazonlinux2: ami-058943e7d9b9cabfb
+    ap-northeast-1:
+      amazonlinux2: ami-01748a72bed07727c
+      centos7: ami-0ddea5e0f69c193a4
+      rhel7: ami-0e3e6ca71a19ccf06
+    ap-northeast-2:
+      amazonlinux2: ami-0094965d55b3bb1ff
+      centos7: ami-0e4214f08b51e23cc
+      rhel7: ami-0f84aff229263c1fc
+    ap-south-1:
+      amazonlinux2: ami-04b1ddd35fd71475a
+      centos7: ami-0ffc7af9c06de0077
+      rhel7: ami-0b105c57e305d9064
+    ap-southeast-1:
+      amazonlinux2: ami-00b8d9cb8a7161e41
+      centos7: ami-0adfdaea54d40922b
+      rhel7: ami-031290b4bd9eaa715
+    ap-southeast-2:
+      amazonlinux2: ami-06ce513624b435a22
+      centos7: ami-03d56f451ca110e99
+      rhel7: ami-06d2821bfc76dcda3
+    ca-central-1:
+      amazonlinux2: ami-0c3e7f50c89a372ae
+      centos7: ami-0a7c5b189b6460115
+      rhel7: ami-0a43efe505004e592
+    eu-central-1:
+      amazonlinux2: ami-03c3a7e4263fd998c
+      centos7: ami-08b6d44b4f6f7b279
+      rhel7: ami-0fc86555914f6a9f2
+    eu-north-1:
+      amazonlinux2: ami-02cb52d7ba9887a93
+      centos7: ami-0358414bac2039369
+      rhel7: ami-8833bbf6
+    eu-south-1:
+      amazonlinux2: ami-080807541452b0410
+      centos7: ami-0fe3899b62205176a
+      rhel7: ami-004f2ac6013e4fcfb
+    eu-west-1:
+      amazonlinux2: ami-01720b5f421cf0179
+      centos7: ami-04f5641b0d178a27a
+      rhel7: ami-04c89a19fea29f1f0
+    eu-west-2:
+      amazonlinux2: ami-0e80a462ede03e653
+      centos7: ami-0b22fcaf3564fb0c9
+      rhel7: ami-06fe0c124aedcef5f
+    eu-west-3:
+      amazonlinux2: ami-00798d7180f25aac2
+      centos7: ami-072ec828dae86abe5
+      rhel7: ami-08295de7534115935
+    me-south-1:
+      amazonlinux2: ami-0032aa87bb75498ea
+      centos7: ami-0ac17dcdd6f6f4eb6
+      rhel7: ami-0e845cba4071a4a1a
+    sa-east-1:
+      amazonlinux2: ami-022082b7f1da62478
+      centos7: ami-02334c45dd95ca1fc
+      rhel7: ami-06efd558d6a5fb959
+    us-east-1:
+      amazonlinux2: ami-0be2609ba883822ec
+      centos7: ami-00e87074e52e6c9f9
+      rhel7: ami-08a7d2bfef687328f
+    us-east-2:
+      amazonlinux2: ami-0a0ad6b70e61be944
+      centos7: ami-00f8e2c955f7ffa9b
+      rhel7: ami-0e166e72fda655c63
+    us-west-1:
+      amazonlinux2: ami-03130878b60947df3
+      centos7: ami-08d2d8b00f270d03b
+      rhel7: ami-056efb42b219f9abb
+    us-west-2:
+      amazonlinux2: ami-0a36eb8fadc976275
+      centos7: ami-0686851c4e7b1a8e1
+      rhel7: ami-02deb4589e0f0d95e
 
 Conditions:
+  PublicVpc: !Equals [ !Ref PublicVpc, 'true' ]
+
   UseCustomAMI: !Not [!Equals [!Ref CustomAMI, ""]]
+
+  ErrorSnsTopicEmail: !Not [!Equals [!Ref ErrorSnsTopicEmail, ""]]
 
 Resources:
   # ============ BEGIN PRE-REQUISITE ============ #
@@ -299,6 +334,14 @@ Resources:
                   - logs:PutLogEvents
                 Resource:
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":logs:", !Ref "AWS::Region", ":", !Ref  "AWS::AccountId", ":log-group:/aws/lambda/", !Join [ "-", [ !FindInMap [ Info, Data, ClusterIdPrefix ], !Ref "AWS::StackName"] ], "*"] ]
+              - Effect: Allow
+                Action:
+                  - iam:ListRoles
+                Resource: "*"
+                Condition:
+                  "StringEqualsIfExists":
+                      "aws:PrincipalAccount": !Sub "${AWS::AccountId}"
+
 
   CheckPreRequisiteLambda:
     Type: AWS::Lambda::Function
@@ -317,6 +360,7 @@ Resources:
         ZipFile: !Sub |
           import cfnresponse
           import re
+          import boto3
           '''
           Check SOCA Pre-Requisite
           '''
@@ -356,10 +400,18 @@ Resources:
             PublicSubnetMaskBits = 32 - int(VPCCidrPrefixBits) - int(PublicSubnetMaskPrefixBits)
             if PublicSubnetMaskBits > 6: PublicSubnetMaskBits = 6
             PrivateSubnetMaskBits = 32 - int(VPCCidrPrefixBits) - int(PrivateSubnetMaskPrefixBits)
+            
+            iam_client = boto3.client('iam')
+            es_roles = iam_client.list_roles(PathPrefix='/aws-service-role/es.amazonaws.com')
+            if len(es_roles['Roles']) == 0:
+                CreateESServiceRole = "True"
+            else:
+                CreateESServiceRole = "False"
 
             responseData = {'ClusterId': clusterId.lower(),
                             'PublicSubnetMaskBits': PublicSubnetMaskBits,
-                            'PrivateSubnetMaskBits': PrivateSubnetMaskBits}
+                            'PrivateSubnetMaskBits': PrivateSubnetMaskBits,
+                            'CreateESServiceRole': CreateESServiceRole}
 
             cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, 'Pre-Requisites OK')
 
@@ -377,40 +429,167 @@ Resources:
 
   # ============ END PRE-REQUISITE ============ #
 
+  ErrorSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Join [ "-", [ !GetAtt CheckSOCAPreRequisite.ClusterId, "error"] ]
+      DisplayName: !Join [ "-", [ !GetAtt CheckSOCAPreRequisite.ClusterId, "error"] ]
+      Tags:
+        - Key: soca:ClusterId
+          Value: !GetAtt CheckSOCAPreRequisite.ClusterId
+
+  ErrorSnsTopicSubscription:
+    Condition: ErrorSnsTopicEmail
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ErrorSnsTopic
+      Endpoint: !Ref ErrorSnsTopicEmail
+      Protocol: email
+      # FilterPolicy doesn't work for CloudFormation notifications so create a different SNS topic filtered by Lambda
+
+  # Topic for nested stacks.
+  # These are filtered by Lambda to only notify on errors.
+  # See https://aws.amazon.com/premiumsupport/knowledge-center/cloudformation-rollback-email/
+  # CloudFormation doesn't set message attributes so FilterPolicy doesn't work
+
+  CloudFormationSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Join [ "-", [ !GetAtt CheckSOCAPreRequisite.ClusterId, "Cfn"] ]
+      DisplayName: !Join [ "-", [ !GetAtt CheckSOCAPreRequisite.ClusterId, "Cfn"] ]
+      Tags:
+        - Key: soca:ClusterId
+          Value: !GetAtt CheckSOCAPreRequisite.ClusterId
+
+  CloudFormationSnsTopicSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref CloudFormationSnsTopic
+      Endpoint: !GetAtt CloudFormationSnsFilterLambda.Arn
+      Protocol: lambda
+      # FilterPolicy doesn't actually work because CloudFormation doesn't specify message attributes.
+
+  # Lambda to filter CloudFormation SNS notifications
+
+  CloudFormationSnsFilterLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: CloudFormationSnsFilter
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:DeleteLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":logs:", !Ref "AWS::Region", ":", !Ref  "AWS::AccountId", ":log-group:/aws/lambda/", !Join [ "-", [ !FindInMap [ Info, Data, ClusterIdPrefix ], !Ref "AWS::StackName"] ], "*"] ]
+              - Effect: Allow
+                Action:
+                  - iam:ListRoles
+                Resource: "*"
+                Condition:
+                  "StringEqualsIfExists":
+                      "aws:PrincipalAccount": !Sub "${AWS::AccountId}"
+
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref ErrorSnsTopic
+                Condition:
+                  "StringEqualsIfExists":
+                      "aws:PrincipalAccount": !Sub "${AWS::AccountId}"
+
+  # Allow it to be triggered by SNS topic
+  CloudFormationSnsFilterLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref CloudFormationSnsFilterLambda
+      SourceArn: !Ref CloudFormationSnsTopic
+      Action: lambda:InvokeFunction
+      Principal: sns.amazonaws.com
+
+  CloudFormationSnsFilterLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Filter CloudFormation messages
+      FunctionName: !Join [ "-", [!GetAtt CheckSOCAPreRequisite.ClusterId, CloudFormationSnsFilter]]
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt CloudFormationSnsFilterLambdaRole.Arn
+      Runtime: python3.7
+      Timeout: 180
+      Tags:
+        - Key: soca:ClusterId
+          Value: !GetAtt CheckSOCAPreRequisite.ClusterId
+      Environment:
+        Variables:
+          SnsTopic: !Ref ErrorSnsTopic
+      Code:
+        ZipFile: !Sub |
+          import cfnresponse
+          import boto3
+          import json
+          import logging
+          import os
+          '''
+          Filter CloudFormation messages
+          '''
+          logging.getLogger().setLevel(logging.INFO)
+          def lambda_handler(event, context):
+            try:
+              logging.info("event: {}".format(event))
+              snsTopic = os.environ['SnsTopic']
+              for record in event['Records']:
+                subject = record['Sns']['Subject']
+                message = record['Sns']['Message']
+                logging.info("message: {}".format(message))
+                lines = message.split('\n')
+                for line in lines:
+                  logging.info(line)
+                  try:
+                    k, v = line.split('=', 1)
+                  except:
+                    continue
+                  if k == 'ResourceStatus':
+                    resourceStatus = v.strip('\'')
+                logging.info("resourceStatus: {}".format(resourceStatus))
+                if resourceStatus in ['CREATE_COMPLETE', 'UPDATE_IN_PROGRESS', 'UPDATE_COMPLETE_CLEANUP_IN_PROGRESS', 'UPDATE_COMPLETE']:
+                  logging.info("Ignoring message")
+                  continue
+                sns_client = boto3.client('sns')
+                sns_client.publish(TopicArn=snsTopic, Message=message), Subject=subject)
+            except:
+              logging.exception("Unhandled exception")
+
   Network:
     DependsOn: CheckSOCAPreRequisite
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
         VpcCidr: !Ref VpcCidr
+        PublicVpc: !Ref PublicVpc
         ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
-        SocaDomain: 'soca.local'
+        SocaLocalDomain: !Ref SocaLocalDomain
         PublicSubnetMaskBits: !GetAtt CheckSOCAPreRequisite.PublicSubnetMaskBits
         PrivateSubnetMaskBits: !GetAtt CheckSOCAPreRequisite.PrivateSubnetMaskBits
       TimeoutInMinutes: 30
       TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Network.template"] ]
-
-  # Proxy:
-  #   DependsOn: Network
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     Parameters:
-  #       VpcId: !GetAtt Network.Outputs.VpcId
-  #       SocaDomain: 'soca.local'
-  #       HostedZoneId: !GetAtt Network.Outputs.HostedZoneId
-  #       AL2ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", amazonlinux2]
-  #       SSHKeyPair: !Ref SSHKeyPair
-  #       ProxyInstanceType: !Ref ProxyInstanceType
-  #       ProxySubnetId: !GetAtt Network.Outputs.PublicSubnet1
-  #       NoProxy: !Sub "localhost,127.0.0.1,169.254.169.254,169.254.170.2,${VpcCidr},.${AWS::Region}.amazonaws.com"
-  #       UpdateDnsLambdaArn: !GetAtt Network.Outputs.UpdateDnsLambdaArn
-  #       ClientIp: !Ref ClientIp
-  #       PrefixListId: !Ref PrefixListId
-  #       ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
-  #       S3InstallBucket: !Ref S3InstallBucket
-  #       S3InstallFolder: !Ref S3InstallFolder
-  #     TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Proxy.template"] ]
-  #     TimeoutInMinutes: 30
+      NotificationARNs:
+        - !Ref CloudFormationSnsTopic
 
   Security:
     DependsOn: Network
@@ -419,7 +598,8 @@ Resources:
       Parameters:
         VpcId: !GetAtt Network.Outputs.VpcId
         VpcCidr: !Ref VpcCidr
-        SocaDomain: 'soca.local'
+        PublicVpc: !Ref PublicVpc
+        SocaLocalDomain: !Ref SocaLocalDomain
         HostedZoneId: !GetAtt Network.Outputs.HostedZoneId
         AL2ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", amazonlinux2]
         SSHKeyPair: !Ref SSHKeyPair
@@ -427,13 +607,16 @@ Resources:
         RepositoryFolder: !Ref RepositoryFolder
         BastionInstanceType: !Ref BastionInstanceType
         ProxyInstanceType: !Ref ProxyInstanceType
-        ProxySubnetId: !GetAtt Network.Outputs.PublicSubnet1
-        NoProxy: !Sub "localhost,127.0.0.1,169.254.169.254,169.254.170.2,${VpcCidr},.amazonaws.com"
+        ProxySubnetId: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet1, "" ]
+        # VPC endpoints aren't proxied. Can't exclude .amazonaws.com because FSX doesn't have an endpoint.
+        # Interface endpoints resolve to local addresses but apps use DNS name so must exclude them.
+        # S3 is a gateway endpoint so need explict no proxy.
+        NoProxy: !Sub "localhost,127.0.0.1,169.254.169.254,169.254.170.2,${VpcCidr},cloudformation.${AWS::Region}.amazonaws.com,datasync.${AWS::Region}.amazonaws.com,ec2.${AWS::Region}.amazonaws.com,ec2messages.${AWS::Region}.amazonaws.com,elasticfilesystem.${AWS::Region}.amazonaws.com,logs.${AWS::Region}.amazonaws.com,s3.amazonaws.com,s3.${AWS::Region}.amazonaws.com,secretsmanager.${AWS::Region}.amazonaws.com,ssm.${AWS::Region}.amazonaws.com,ssmmessages.${AWS::Region}.amazonaws.com,sns.${AWS::Region}.amazonaws.com,storagegateway.${AWS::Region}.amazonaws.com,.elb.amazonaws.com"
         UpdateDnsLambdaArn: !GetAtt Network.Outputs.UpdateDnsLambdaArn
         HostedZoneId: !GetAtt Network.Outputs.HostedZoneId
-        PublicSubnet1: !GetAtt Network.Outputs.PublicSubnet1
-        PublicSubnet2: !GetAtt Network.Outputs.PublicSubnet2
-        PublicSubnet3: !GetAtt Network.Outputs.PublicSubnet3
+        PublicSubnet1: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet1, "" ]
+        PublicSubnet2: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet2, "" ]
+        PublicSubnet3: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet3, "" ]
         PrivateSubnet1: !GetAtt Network.Outputs.PrivateSubnet1
         PrivateSubnet2: !GetAtt Network.Outputs.PrivateSubnet2
         PrivateSubnet3: !GetAtt Network.Outputs.PrivateSubnet3
@@ -443,10 +626,14 @@ Resources:
         ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
         S3InstallBucket: !Ref S3InstallBucket
         S3InstallFolder: !Ref S3InstallFolder
-        SchedulerPublicIP: !GetAtt Network.Outputs.SchedulerPublicIP
-        EIPNat: !GetAtt Network.Outputs.EIPNat
+        EIPNat: !If [ PublicVpc, !GetAtt Network.Outputs.EIPNat, "" ]
+        CreateESServiceRole: !GetAtt CheckSOCAPreRequisite.CreateESServiceRole
+        ErrorSnsTopicArn: !Ref ErrorSnsTopic
+        ProxyCACertParameterName: !Join [ "", ["/", !GetAtt CheckSOCAPreRequisite.ClusterId, "/proxy/cacert" ] ]
       TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Security.template"] ]
       TimeoutInMinutes: 30
+      NotificationARNs:
+        - !Ref CloudFormationSnsTopic
 
   Storage:
     Type: AWS::CloudFormation::Stack
@@ -462,51 +649,26 @@ Resources:
         ClusterId: !Join [ "-", [ !FindInMap [ Info, Data, ClusterIdPrefix ], !Ref "AWS::StackName"] ]
       TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Storage.template"] ]
       TimeoutInMinutes: 30
-
-  ImageBuilder:
-    Type: AWS::CloudFormation::Stack
-    Properties:
-      Parameters:
-        SocaDomain: 'soca.local'
-        HostedZoneId: !GetAtt Network.Outputs.HostedZoneId
-        ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
-        S3InstallBucket: !Ref S3InstallBucket
-        S3InstallFolder: !Ref S3InstallFolder
-        RepositoryBucket: !Ref RepositoryBucket
-        RepositoryFolder: !Ref RepositoryFolder
-        VpcId: !GetAtt Network.Outputs.VpcId
-        ClientIp: !Ref ClientIp
-        PrefixListId: !Ref PrefixListId
-        PublicSubnet1: !GetAtt Network.Outputs.PublicSubnet1
-        ImageBuilderSecurityGroupId: !GetAtt Security.Outputs.ImageBuilderSecurityGroup
-        SSHKeyPair: !Ref SSHKeyPair
-        AmazonLinux2AMI: !FindInMap [RegionMap, !Ref "AWS::Region", amazonlinux2]
-        CentOS7AMI: !FindInMap [RegionMap, !Ref "AWS::Region", centos7]
-        RHEL7AMI: !FindInMap [RegionMap, !Ref "AWS::Region", rhel7]
-        EFSDataDns: !GetAtt Storage.Outputs.EFSDataDns
-        EFSAppsDns: !GetAtt Storage.Outputs.EFSAppsDns
-        SocaVersion: !FindInMap [ Info, Data, Version ]
-        NoProxy: !GetAtt Security.Outputs.NoProxy
-  
-      TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/ImageBuilder.template.yml"] ]
-      TimeoutInMinutes: 60
+      NotificationARNs:
+        - !Ref CloudFormationSnsTopic
 
   Scheduler:
     DependsOn: Storage
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
-        SocaDomain: 'soca.local'
+        PublicVpc: !Ref PublicVpc
+        SocaLocalDomain: !Ref SocaLocalDomain
         HostedZoneId: !GetAtt Network.Outputs.HostedZoneId
         UpdateDnsLambdaArn: !GetAtt Network.Outputs.UpdateDnsLambdaArn
         SSHKeyPair: !Ref SSHKeyPair
-        ProxyPrivateDnsName: !GetAtt Security.Outputs.ProxyPrivateDnsName
+        ProxyPrivateDnsName: !If [ PublicVpc, !GetAtt Security.Outputs.ProxyPrivateDnsName, "" ]
         NoProxy: !GetAtt Security.Outputs.NoProxy
-        ProxyCACert: !GetAtt Security.Outputs.ProxyCACertParameter
+        ProxyCACertParameterName: !If [ PublicVpc, !GetAtt Security.Outputs.ProxyCACertParameterName, "" ]
         RepositoryBucket: !Ref RepositoryBucket
         RepositoryFolder: !Ref RepositoryFolder
         SchedulerInstanceType: !Ref SchedulerInstanceType
-        SubnetId: !GetAtt Network.Outputs.PublicSubnet1
+        SubnetId: !GetAtt Network.Outputs.PrivateSubnet1
         SecurityGroupId: !GetAtt Security.Outputs.SchedulerSecurityGroup
         SchedulerIAMInstanceProfile: !GetAtt Security.Outputs.SchedulerIAMInstanceProfile
         S3InstallBucket: !Ref S3InstallBucket
@@ -515,64 +677,74 @@ Resources:
         ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
         EFSDataDns: !GetAtt Storage.Outputs.EFSDataDns
         EFSAppsDns: !GetAtt Storage.Outputs.EFSAppsDns
-        ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", amazonlinux2 ]
+        AL2ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", amazonlinux2]
         ComputeNodeCustomAMI: !If [UseCustomAMI, !Ref CustomAMI, !FindInMap [RegionMap, !Ref "AWS::Region", !Ref BaseOS]]
         ComputeNodeBaseOS: !Ref BaseOS
         UserName: !Ref UserName
         UserPassword: !Ref UserPassword
-        SchedulerPublicIP: !GetAtt Network.Outputs.SchedulerPublicIP
-        SchedulerPublicIPAllocation: !GetAtt Network.Outputs.SchedulerPublicIPAllocation
+        ErrorSnsTopicArn: !Ref ErrorSnsTopic
       TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Scheduler.template"] ]
       TimeoutInMinutes: 60
+      NotificationARNs:
+        - !Ref CloudFormationSnsTopic
 
   Analytics:
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
-        SchedulerSecurityGroup: !GetAtt Security.Outputs.SchedulerSecurityGroup
-        PublicSubnet1: !GetAtt Network.Outputs.PublicSubnet1
+        ElasticSearchSecurityGroup: !GetAtt Security.Outputs.ElasticSearchSecurityGroup
+        VpcId: !GetAtt Network.Outputs.VpcId
+        PrivateSubnet1: !GetAtt Network.Outputs.PrivateSubnet1
+        PrivateSubnet2: !GetAtt Network.Outputs.PrivateSubnet2
         ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
-        ClientIp: !Ref ClientIp
-        PrefixListId: !Ref PrefixListId
-        SchedulerPublicIP: !GetAtt Network.Outputs.SchedulerPublicIP
-        EIPNat: !GetAtt Network.Outputs.EIPNat
-
       TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Analytics.template"] ]
       TimeoutInMinutes: 30
+      NotificationARNs:
+        - !Ref CloudFormationSnsTopic
 
   Viewer:
-    DependsOn: Analytics
+    DependsOn:
+      - Scheduler
+      - Analytics
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
+        PublicVpc: !Ref PublicVpc
         LoadBalancerSecurityGroup: !GetAtt Security.Outputs.LoadBalancerSecurityGroup
-        PublicSubnet1: !GetAtt Network.Outputs.PublicSubnet1
-        PublicSubnet2: !GetAtt Network.Outputs.PublicSubnet2
-        PublicSubnet3: !GetAtt Network.Outputs.PublicSubnet3
+        SchedulerSecurityGroup: !GetAtt Security.Outputs.SchedulerSecurityGroup
+        PublicSubnet1: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet1, "" ]
+        PublicSubnet2: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet2, "" ]
+        PublicSubnet3: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet3, "" ]
+        PrivateSubnet1: !GetAtt Network.Outputs.PrivateSubnet1
+        PrivateSubnet2: !GetAtt Network.Outputs.PrivateSubnet2
+        PrivateSubnet3: !GetAtt Network.Outputs.PrivateSubnet3
         ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
         VpcId: !GetAtt Network.Outputs.VpcId
         SchedulerInstanceId: !GetAtt Scheduler.Outputs.SchedulerInstanceId
         SchedulerIAMRole: !GetAtt Security.Outputs.SchedulerIAMRole
         LambdaACMIAMRoleArn: !GetAtt Security.Outputs.LambdaACMIAMRoleArn
+        ESDomainIPAddresses: !GetAtt Analytics.Outputs.ESDomainIPAddresses
+        GetELBPrivateIPLambdaArn: !GetAtt Security.Outputs.GetELBPrivateIPLambdaArn
       TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Viewer.template"] ]
       TimeoutInMinutes: 30
-
+      NotificationARNs:
+        - !Ref CloudFormationSnsTopic
 
   Configuration:
     DependsOn: Viewer
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
-        SocaDomain: 'soca.local'
-        ProxyPrivateDnsName: !GetAtt Security.Outputs.ProxyPrivateDnsName
+        SocaLocalDomain: !Ref SocaLocalDomain
+        ProxyPrivateDnsName: !If [ PublicVpc, !GetAtt Security.Outputs.ProxyPrivateDnsName, "" ]
         NoProxy: !GetAtt Security.Outputs.NoProxy
-        ProxyCACert: !GetAtt Security.Outputs.ProxyCACertParameter
+        ProxyCACertParameterName: !GetAtt Security.Outputs.ProxyCACertParameterName
+        ProxyCACert: !GetAtt Security.Outputs.ProxyCACertParameterName
         RepositoryBucket: !Ref RepositoryBucket
         RepositoryFolder: !Ref RepositoryFolder
         SchedulerInstanceId: !GetAtt Scheduler.Outputs.SchedulerInstanceId
         SchedulerPrivateDnsName: !GetAtt Scheduler.Outputs.SchedulerPrivateDnsName
         SchedulerPrivateIP: !GetAtt Scheduler.Outputs.SchedulerPrivateIP
-        SchedulerPublicIP: !GetAtt Network.Outputs.SchedulerPublicIP
         SchedulerSecurityGroup: !GetAtt Security.Outputs.SchedulerSecurityGroup
         ComputeNodeIAMRoleArn: !GetAtt Security.Outputs.ComputeNodeIAMRoleArn
         ComputeNodeIAMRole: !GetAtt Security.Outputs.ComputeNodeIAMRole
@@ -582,9 +754,10 @@ Resources:
         SchedulerIAMRole: !GetAtt Security.Outputs.SchedulerIAMRole
         ComputeNodeSecurityGroup: !GetAtt Security.Outputs.ComputeNodeSecurityGroup
         VpcId: !GetAtt Network.Outputs.VpcId
-        PublicSubnet1: !GetAtt Network.Outputs.PublicSubnet1
-        PublicSubnet2: !GetAtt Network.Outputs.PublicSubnet2
-        PublicSubnet3: !GetAtt Network.Outputs.PublicSubnet3
+        PublicVpc: !Ref PublicVpc
+        PublicSubnet1: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet1, "" ]
+        PublicSubnet2: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet2, "" ]
+        PublicSubnet3: !If [ PublicVpc, !GetAtt Network.Outputs.PublicSubnet3, "" ]
         PrivateSubnet1: !GetAtt Network.Outputs.PrivateSubnet1
         PrivateSubnet2: !GetAtt Network.Outputs.PrivateSubnet2
         PrivateSubnet3: !GetAtt Network.Outputs.PrivateSubnet3
@@ -604,22 +777,26 @@ Resources:
         DefaultMetricCollection: !FindInMap [ Send, AnonymousUsage, Data ]
       TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Configuration.template"] ]
       TimeoutInMinutes: 60
+      NotificationARNs:
+        - !Ref CloudFormationSnsTopic
 
 Outputs:
   BastionDnsName:
+    Condition: PublicVpc
     Value: !GetAtt Security.Outputs.BastionDnsName
-  SchedulerPublicIP:
-    Value: !GetAtt Network.Outputs.SchedulerPublicIP
   LDAPMasterUsername:
     Value: admin
   LDAPMasterPassword:
     Value: /root/OpenLdapAdminPassword.txt
   AnalyticsDashboard:
-    Value: !Join [ "", [ "https://", !GetAtt Analytics.Outputs.ESDomainEndpoint, "/_plugin/kibana/"]]
-  ConnectionString:
-    Value: !Join [ "", [ "ssh -i ", !Ref SSHKeyPair, ".pem ", !FindInMap [ Info, User, amazonlinux2 ], "@", !GetAtt Network.Outputs.SchedulerPublicIP]]
+    Value: !Join [ "", [ "https://", !GetAtt Viewer.Outputs.LoadBalancerDNSName, "/_plugin/kibana/"]]
+  SSHConnectionString:
+    Condition: PublicVpc
+    Value: !Join [ "", [ "ssh -i ", !Ref SSHKeyPair, ".pem ", !FindInMap [ Info, User, amazonlinux2 ], "@", !GetAtt Security.Outputs.BastionDnsName]]
   WebUserInterface:
     Value: !Join [ "", [ "https://", !GetAtt Viewer.Outputs.LoadBalancerDNSName]]
+  WebUIEndpointServiceName:
+    Value: !GetAtt Viewer.Outputs.WebUIEndpointServiceName
   ComputeNodeBaseOS:
     Value: !Ref BaseOS
   ComputeNodeCustomAMI:
@@ -627,44 +804,63 @@ Outputs:
   Version:
     Value: !FindInMap [ Info, Data, Version ]
 
-  Centos7SOCAImagePipelineUrl:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7SOCAImagePipelineUrl
-  Centos7SOCAImageRunPipelineCommand:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7SOCAImageRunPipelineCommand
-  Centos7SOCAImageBuildUrl:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7SOCAImageBuildUrl
+  # Exports that can be used by other stacks such as CollaborationVpcEndpoint.template
+  S3InstallBucket:
+    Value: !Ref S3InstallBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-S3InstallBucket"
 
-  Centos7SOCADesktopImagePipelineUrl:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7SOCADesktopImagePipelineUrl
-  Centos7SOCADesktopImageRunPipelineCommand:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7SOCADesktopImageRunPipelineCommand
-  Centos7SOCADesktopImageBuildUrl:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7SOCADesktopImageBuildUrl
+  S3InstallFolder:
+    Value: !Ref S3InstallFolder
+    Export:
+      Name: !Sub "${AWS::StackName}-S3InstallFolder"
+      
+  CloudFormationSnsTopic:
+    Value: !Ref CloudFormationSnsTopic
+    Export:
+      Name: !Sub "${AWS::StackName}-CloudFormationSnsTopic"
+      
+  CollaborationEndpointServiceNameExport:
+    Value: !GetAtt Viewer.Outputs.WebUIEndpointServiceName
+    Export: 
+      Name: !Sub "${AWS::StackName}-CollaborationEndpointServiceName"
 
-  Centos7EDAImagePipelineUrl:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7EDAImagePipelineUrl
-  Centos7EDAImageRunPipelineCommand:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7EDAImageRunPipelineCommand
-  Centos7EDAImageBuildUrl:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7EDAImageBuildUrl
+  VpcId:
+    Value: !GetAtt Network.Outputs.VpcId
+    Export: 
+      Name: !Sub "${AWS::StackName}-VpcId"
 
-  Centos7EDADesktopImagePipelineUrl:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7EDADesktopImagePipelineUrl
-  Centos7EDADesktopImageRunPipelineCommand:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7EDADesktopImageRunPipelineCommand
-  Centos7EDADesktopImageBuildUrl:
-    Value: !GetAtt ImageBuilder.Outputs.Centos7EDADesktopImageBuildUrl
+  SocaLocalDomain:
+    Value: !Ref SocaLocalDomain
+    Export: 
+      Name: !Sub "${AWS::StackName}-SocaLocalDomain"
 
-  RHEL7EDAImagePipelineUrl:
-    Value: !GetAtt ImageBuilder.Outputs.RHEL7EDAImagePipelineUrl
-  RHEL7EDAImageRunPipelineCommand:
-    Value: !GetAtt ImageBuilder.Outputs.RHEL7EDAImageRunPipelineCommand
-  RHEL7EDAImageBuildUrl:
-    Value: !GetAtt ImageBuilder.Outputs.RHEL7EDAImageBuildUrl
-
-  RHEL7EDADesktopImagePipelineUrl:
-    Value: !GetAtt ImageBuilder.Outputs.RHEL7EDADesktopImagePipelineUrl
-  RHEL7EDADesktopImageRunPipelineCommand:
-    Value: !GetAtt ImageBuilder.Outputs.RHEL7EDADesktopImageRunPipelineCommand
-  RHEL7EDADesktopImageBuildUrl:
-    Value: !GetAtt ImageBuilder.Outputs.RHEL7EDADesktopImageBuildUrl
+  PrivateSubnet1:
+    Value: !GetAtt Network.Outputs.PrivateSubnet1
+    Export: 
+      Name: !Sub "${AWS::StackName}-PrivateSubnet1"
+  
+  PrivateSubnet2:
+    Value: !GetAtt Network.Outputs.PrivateSubnet2
+    Export: 
+      Name: !Sub "${AWS::StackName}-PrivateSubnet2"
+  
+  PrivateSubnet3:
+    Value: !GetAtt Network.Outputs.PrivateSubnet3
+    Export: 
+      Name: !Sub "${AWS::StackName}-PrivateSubnet3"
+  
+  HostedZoneId:
+    Value: !GetAtt Network.Outputs.HostedZoneId
+    Export: 
+      Name: !Sub "${AWS::StackName}-HostedZoneId"
+  
+  UpdateDnsLambdaArn:
+    Value: !GetAtt Network.Outputs.UpdateDnsLambdaArn
+    Export: 
+      Name: !Sub "${AWS::StackName}-UpdateDnsLambdaArn"
+  
+  VpcEndpointSecurityGroup:
+    Value: !GetAtt Security.Outputs.VpcEndpointSecurityGroup
+    Export: 
+      Name: !Sub "${AWS::StackName}-VpcEndpointSecurityGroup"

@@ -6,6 +6,7 @@ import re
 import sys
 import uuid
 import boto3
+from math import ceil
 from botocore.exceptions import ClientError
 
 sys.path.append(os.path.dirname(__file__))
@@ -19,6 +20,32 @@ ec2 = boto3.client('ec2')
 servicequotas = boto3.client("service-quotas")
 aligo_configuration = configuration.get_aligo_configuration()
 
+def find_running_cpus_per_instance(instance_list):
+    running_vcpus = 0
+    token = True
+    next_token = ''
+    while token is True:
+        response = ec2.describe_instances(
+            Filters=[
+                {'Name': 'instance-type', 'Values': instance_list},
+                {'Name': 'instance-state-name', 'Values': ['running', 'pending']}],
+            MaxResults=1000,
+            NextToken=next_token,
+        )
+        try:
+            next_token = response['NextToken']
+        except KeyError:
+            token = False
+        for reservation in response['Reservations']:
+            for instance in reservation['Instances']:
+                if "CpuOptions" in instance.keys():
+                    running_vcpus += instance["CpuOptions"]["CoreCount"] * 2
+                else:
+                    if 'xlarge' in instance["InstanceType"]:
+                        running_vcpus += 4
+                    else:
+                        running_vcpus += 2
+    return running_vcpus
 
 def verify_ri_saving_availabilities(instance_type, instance_type_info):
     if instance_type not in instance_type_info.keys():
@@ -60,8 +87,8 @@ def verify_ri_saving_availabilities(instance_type, instance_type_info):
             for reservation in get_ri_count["ReservedInstances"]:
                 instance_type_info[instance_type]["current_ri_purchased"] += reservation["InstanceCount"]
 
-    print("Detected {} running {} instance ".format(instance_type_info[instance_type]["current_instance_in_use"],instance_type))
-    print("Detected {} RI for {} instance ".format(instance_type_info[instance_type]["current_ri_purchased"], instance_type))
+    #print("Detected {} running {} instance ".format(instance_type_info[instance_type]["current_instance_in_use"],instance_type))
+    #print("Detected {} RI for {} instance ".format(instance_type_info[instance_type]["current_ri_purchased"], instance_type))
     return instance_type_info
 
 def verify_vcpus_limit(instance_type, desired_capacity, quota_info):
@@ -123,58 +150,13 @@ def verify_vcpus_limit(instance_type, desired_capacity, quota_info):
     if not quota_info or instance_type not in quota_info.keys():
         all_instances_available = ec2._service_model.shape_for('InstanceType').enum
         all_instances_for_quota = [instance_family for x in instances_family_allowed_in_quota for instance_family in all_instances_available if instance_family.startswith(x.rstrip().lstrip())]
-        # get all running instance
-        token = True
-        next_token = ''
-        while token is True:
-            response = ec2.describe_instances(
-                Filters=[
-                    # Describe instance as a limit of 200 filters
-                    {'Name': 'instance-type', 'Values': all_instances_for_quota[0:150]},
-                    {'Name': 'instance-state-name', 'Values': ['running', 'pending']}],
-                MaxResults=1000,
-                NextToken=next_token,
-            )
-            try:
-                next_token = response['NextToken']
-            except KeyError:
-                token = False
-            for reservation in response['Reservations']:
-                for instance in reservation['Instances']:
-                    if "CpuOptions" in instance.keys():
-                        running_vcpus += instance["CpuOptions"]["CoreCount"] * 2
-                    else:
-                        if 'xlarge' in instance["InstanceType"]:
-                            running_vcpus += 4
-                        else:
-                            running_vcpus += 2
+        required_api_calls = ceil(len(all_instances_for_quota) / 190)
+        for i in range(0, required_api_calls):
+            # DescribeInstances has a limit of 200 attributes per filter
+            instances_to_check = all_instances_for_quota[i * 190:(i + 1) * 190]
+            if instances_to_check:
+                running_vcpus += find_running_cpus_per_instance(instances_to_check)
 
-        # Describe instance as a limit of 200 filters
-        if len(all_instances_for_quota) > 150:
-            token = True
-            next_token = ''
-            while token is True:
-                response = ec2.describe_instances(
-                    Filters=[
-                        {'Name': 'instance-type', 'Values': all_instances_for_quota[150:]},
-                        {'Name': 'instance-state-name', 'Values': ['running', 'pending']}],
-                    MaxResults=1000,
-                    NextToken=next_token,
-                )
-                try:
-                    next_token = response['NextToken']
-                except KeyError:
-                    token = False
-
-                for reservation in response['Reservations']:
-                    for instance in reservation['Instances']:
-                        if "CpuOptions" in instance.keys():
-                            running_vcpus += instance["CpuOptions"]["CoreCount"] * 2
-                        else:
-                            if 'xlarge' in instance["InstanceType"]:
-                                running_vcpus += 4
-                            else:
-                                running_vcpus += 2
     else:
         running_vcpus = quota_info[instance_type]["vcpus_provisioned"]
 
@@ -414,15 +396,21 @@ def check_config(**kwargs):
             # if placement group is True and more than 1 subnet is defined, force default to 1 subnet
             kwargs['subnet_id'] = [kwargs['subnet_id'][0]]
 
-    cpus_count_pattern = re.search(r'[.](\d+)', kwargs['instance_type'][0])
-    if cpus_count_pattern:
-        kwargs['core_count'] = int(cpus_count_pattern.group(1)) * 2
-    else:
-        if 'xlarge' in kwargs['instance_type'][0]:
-            kwargs['core_count'] = 2
+    # Check core_count and ht_support
+    try:
+        instance_attributes = ec2.describe_instance_types(InstanceTypes=[kwargs['instance_type'][0]])
+        if len(instance_attributes['InstanceTypes']) == 0:
+            error = return_message('Unable to check instance: ' + kwargs['instance_type'][0])
+        else: 
+            kwargs['core_count'] = instance_attributes['InstanceTypes'][0]['VCpuInfo']['DefaultCores']
+            if instance_attributes['InstanceTypes'][0]['VCpuInfo']['DefaultThreadsPerCore'] == 1:
+                # Set ht_support to False for instances with DefaultThreadsPerCore = 1 (e.g. graviton)
+                kwargs['ht_support'] = False
+    except ClientError as e:
+        if e.response['Error'].get('Code') == 'InvalidInstanceType':
+            error = return_message('InvalidInstanceType: ' + kwargs['instance_type'][0])
         else:
-            kwargs['core_count'] = 1
-
+            error = return_message('Unable to check instance: ' + kwargs['instance_type'][0])
 
     # Validate Spot Allocation Strategy
     mapping = {
@@ -492,21 +480,27 @@ def check_config(**kwargs):
             error = return_message('spot_price must be either "auto" or a float value"')
 
     # Validate EFA
-    if kwargs['efa_support'] not in [True, False]:
-        kwargs['efa_support'] = False
-    else:
-        if kwargs['efa_support'] is True:
-            for instance_type in kwargs['instance_type']:
-                check_efa_support = ec2.describe_instance_types(
-                    InstanceTypes=[instance_type],
-                    Filters=[
-                        {"Name": "network-info.efa-supported",
-                         "Values": ["true"]}
-                    ]
-                )
+    try:
+        if kwargs['efa_support'] not in [True, False]:
+            kwargs['efa_support'] = False
+        else:
+            if kwargs['efa_support'] is True:
+                for instance_type in kwargs['instance_type']:
+                    check_efa_support = ec2.describe_instance_types(
+                        InstanceTypes=[instance_type],
+                        Filters=[
+                            {"Name": "network-info.efa-supported",
+                             "Values": ["true"]}
+                        ]
+                    )
 
-                if len(check_efa_support["InstanceTypes"]) == 0:
-                    error = return_message('You have requested EFA support but your instance  (' + instance_type + ') does not support EFA')
+                    if len(check_efa_support["InstanceTypes"]) == 0:
+                        error = return_message('You have requested EFA support but your instance  (' + instance_type + ') does not support EFA')
+    except ClientError as e:
+        if e.response['Error'].get('Code') == 'InvalidInstanceType':
+            error = return_message('InvalidInstanceType: ' + kwargs['instance_type'])
+        else:
+            error = return_message('Unable to check EFA support for instance: ' + kwargs['instance_type'])
 
     # Validate Keep EBS
     if kwargs['keep_ebs'] not in [True, False]:
@@ -686,13 +680,29 @@ def main(**kwargs):
                 'Key': 'ProxyCACert',
                 'Default': aligo_configuration['ProxyCACert']
             },
+            'ProxyCACertParameterName': {
+                'Key': 'ProxyCACertParameterName',
+                'Default': aligo_configuration['ProxyCACertParameterName']
+            },
             'ProxyPrivateDnsName': {
                 'Key': 'ProxyPrivateDnsName',
                 'Default': aligo_configuration['ProxyPrivateDnsName']
             },
+            'PublicVpc': {
+                'Key': 'PublicVpc',
+                'Default': aligo_configuration['PublicVpc']
+            },
             'Region': {
                 'Key': 'Region',
                 'Default': aligo_configuration['Region']
+            },
+            'RepositoryBucket': {
+                'Key': 'RepositoryBucket',
+                'Default': aligo_configuration['RepositoryBucket']
+            },
+            'RepositoryFolder': {
+                'Key': 'RepositoryFolder',
+                'Default': aligo_configuration['RepositoryFolder']
             },
             'RootSize': {
                 'Key': 'root_size',
@@ -722,9 +732,9 @@ def main(**kwargs):
                 'Key': None,
                 'Default': aligo_configuration['SchedulerPrivateDnsName']
             },
-            'SocaDomain': {
-                'Key': 'SocaDomain',
-                'Default': aligo_configuration['SocaDomain']
+            'SocaLocalDomain': {
+                'Key': 'SocaLocalDomain',
+                'Default': aligo_configuration['SocaLocalDomain']
             },
             'SolutionMetricLambda': {
                 'Key': None,

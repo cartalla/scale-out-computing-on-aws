@@ -34,6 +34,7 @@ Metadata:
           - PrivateSubnet3
           - ClientIp
           - SSHKeyPair
+          - SocaLocalDomain
           - EFSAppsDns
           - EFSDataDns
           - SecurityGroupIdCompute
@@ -54,6 +55,8 @@ Metadata:
         default: (Optional) Have your own AMI?
       SSHKeyPair:
         default: What's your SSH keypair?
+      SocaLocalDomain:
+        default: SocaLocalDomain
       BastionInstanceType:
         default: Instance type for your bastion server
       LdapInstanceType:
@@ -151,6 +154,11 @@ Parameters:
   SSHKeyPair:
     Type: AWS::EC2::KeyPair::KeyName
     Description: Default SSH pem keys used to SSH into the scheduler
+
+  SocaLocalDomain:
+    Type: String
+    Description: Domain name for Route53 local zone that is used for local DNS entries.
+    Default: 'soca.local'
 
   BastionInstanceType:
     Default: t3a.nano
@@ -410,33 +418,11 @@ Resources:
 	ExistingResources: true
         VpcCidr: !Ref VpcCidr
         ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
-        SocaDomain: 'soca.local'
+        SocaLocalDomain: !Ref SocaLocalDomain
         PublicSubnetMaskBits: !GetAtt CheckSOCAPreRequisite.PublicSubnetMaskBits
         PrivateSubnetMaskBits: !GetAtt CheckSOCAPreRequisite.PrivateSubnetMaskBits
       TimeoutInMinutes: 30
       TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Network.template"] ]
-
-  # Proxy:
-  #   DependsOn: Network
-  #   Type: AWS::CloudFormation::Stack
-  #   Properties:
-  #     Parameters:
-  #       VpcId: !GetAtt Network.Outputs.VpcId
-  #       SocaDomain: 'soca.local'
-  #       HostedZoneId: !GetAtt Network.Outputs.HostedZoneId
-  #       AL2ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", amazonlinux2]
-  #       SSHKeyPair: !Ref SSHKeyPair
-  #       ProxyInstanceType: !Ref ProxyInstanceType
-  #       ProxySubnetId: !GetAtt Network.Outputs.PublicSubnet1
-  #       NoProxy: !Sub "localhost,127.0.0.1,169.254.169.254,169.254.170.2,${VpcCidr},.${AWS::Region}.amazonaws.com"
-  #       UpdateDnsLambdaArn: !GetAtt Network.Outputs.UpdateDnsLambdaArn
-  #       ClientIp: !Ref ClientIp
-  #       PrefixListId: !Ref PrefixListId
-  #       ClusterId: !GetAtt CheckSOCAPreRequisite.ClusterId
-  #       S3InstallBucket: !Ref S3InstallBucket
-  #       S3InstallFolder: !Ref S3InstallFolder
-  #     TemplateURL: !Join [ "/", [!Sub "https://s3.${AWS::URLSuffix}", !Ref S3InstallBucket, !Ref S3InstallFolder, "templates/Proxy.template"] ]
-  #     TimeoutInMinutes: 30
 
   Security:
     DependsOn: Network
@@ -444,7 +430,7 @@ Resources:
     Properties:
       Parameters:
         VpcId: !Ref VpcId
-        SocaDomain: 'soca.local'
+        SocaLocalDomain: !Ref SocaLocalDomain
         HostedZoneId: !GetAtt Network.Outputs.HostedZoneId
         AL2ImageId: !FindInMap [RegionMap, !Ref "AWS::Region", amazonlinux2]
         SSHKeyPair: !Ref SSHKeyPair
@@ -492,7 +478,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
-        SocaDomain: 'soca.local'
+        SocaLocalDomain: !Ref SocaLocalDomain
         HostedZoneId: !GetAtt Network.Outputs.HostedZoneId
         UpdateDnsLambdaArn: !GetAtt Network.Outputs.UpdateDnsLambdaArn
         SSHKeyPair: !Ref SSHKeyPair
@@ -554,7 +540,7 @@ Resources:
     Type: AWS::CloudFormation::Stack
     Properties:
       Parameters:
-        SocaDomain: 'soca.local'
+        SocaLocalDomain: !Ref SocaLocalDomain
         ProxyPrivateDnsName: !GetAtt Security.Outputs.ProxyPrivateDnsName
         NoProxy: !GetAtt Security.Outputs.NoProxy
         SchedulerInstanceId: !GetAtt Scheduler.Outputs.SchedulerInstanceId

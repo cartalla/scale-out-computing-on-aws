@@ -1,0 +1,290 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: (SOCA) - Create Synopsys License server
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+            default: Instance details
+        Parameters:
+          - VpcId
+          - SubnetId
+          - SecurityGroup
+          - ImageId
+          - InstanceType
+          - SSHKeyPair
+          - FsxId
+          - FsxMountOrigin
+          - SynopsysInstallerFsxPath
+          - SynopsysSCLFsxPath
+
+    ParameterLabels:
+      VpcId:
+        default: VpcId
+      SubnetId:
+        default: SubnetId
+      SecurityGroup:
+        default: SecurityGroup
+      ImageId:
+        default: ImageId
+      InstanceType:
+        default: InstanceType
+      SSHKeyPair:
+        default: SSHKeyPair
+      FsxId:
+        default: FsxId
+      FsxMountOrigin:
+        default: FsxMountOrigin
+      SynopsysInstallerFsxPath:
+        default: SynopsysInstallerFsxPath
+      SynopsysSCLFsxPath:
+        default: SynopsysSCLFsxPath
+
+Parameters:
+  VpcId:
+    Type: String
+    Description: VPC ID where the License server will be launched
+
+  SubnetId:
+    Type: String
+    Description: Subnet ID where the license server will be launched.
+
+  SecurityGroup:
+    Type: String
+    Description: Security Gruop for the License Server
+
+  ImageId:
+    Type: String
+    Description: AMI to use for the license server
+
+  InstanceType:
+    Type: String
+    Default: m5.2xlarge
+    Description: Instance type for the license server
+
+  SSHKeyPair:
+    Type: String
+    Description: SSH Keypair to use for the license server
+
+  FsxId:
+    Type: String
+    Description: Id of FSX Lustre file system to mount
+
+  FsxMountOrigin:
+    Type: String
+    Description: FSX Lustre file system DNS name to mount
+
+  SynopsysInstallerFsxPath:
+    Type: String
+    Description: Path on FSX volume with Synopsys Installer installation files
+
+  SynopsysSCLFsxPath:
+    Type: String
+    Description: Path on FSX volume with Synopsys SCL installation files
+
+Resources:
+  #============================================================================
+  # LicenseServer Security Group
+  #============================================================================
+
+  LicenseServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: SG for AMI creation
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-LicenseServer
+        - Key: soca:ClusterId
+          Value: !Sub "${AWS::StackName}"
+
+  #============================================================================
+  # LicenseServer instance role
+  #============================================================================
+  LicenseServerInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - !Sub "ec2.${AWS::URLSuffix}"
+                - !Sub "ssm.${AWS::URLSuffix}"
+            Action:
+              - sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore # Support for SSM
+      Policies:
+        - PolicyName: LicenseServerPermissions
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::*"
+
+              - Effect: Allow
+                Action:
+                  - s3:Get*
+                  - s3:List*
+                Resource:
+                  - !Sub "arn:aws:s3:::*"
+
+  LicenseServerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles:
+        - !Ref LicenseServerInstanceRole
+
+  #============================================================================
+  # License server
+  #============================================================================
+
+  LicenseServerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      DisableApiTermination: false
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile:
+        Ref: LicenseServerInstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: 20
+            VolumeType: gp2
+            Encrypted: true
+
+      KeyName: !Ref SSHKeyPair
+
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: "true"
+          DeviceIndex: "0"
+          GroupSet: 
+            - !Ref LicenseServerSecurityGroup
+            - !Ref SecurityGroup
+          SubnetId: !Ref SubnetId
+
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-LicenseServer"
+
+      UserData:
+          "Fn::Base64": !Sub |
+            #!/bin/bash -xe
+
+            # Update to latest ssm agent
+            if yum install -y https://s3.${AWS::Region}.amazonaws.com/amazon-ssm-${AWS::Region}/latest/linux_amd64/amazon-ssm-agent.rpm; then
+                systemctl restart amazon-ssm-agent
+            fi
+
+            if ! yum list installed epel-release; then
+                amazon-linux-extras install -y epel
+            fi
+            
+            # Disable automatic motd update
+            /usr/sbin/update-motd --disable
+            rm -f /etc/cron.d/update-motd
+            rm -f /etc/update-motd.d/*
+
+            # Set up motd
+            if ! yum list installed figlet &> /dev/null; then
+                yum -y install figlet
+            fi
+            figlet -f slant "License Server" > /etc/motd
+
+            if ! yum list installed lustre-client; then
+                amazon-linux-extras install -y lustre2.10
+            fi
+            
+            packages=( \
+                emacs \
+                fuse \
+                fuse-devel \
+                #fuse-devel-static \
+                fuse-libs \
+                glibc.i686 \
+                #glibc-devel.i686 \
+                gvfs-fuse \
+                #libfuse2 \
+                #redhat-lsb \
+                #system-lsb \
+                vim \
+            )
+            for package in ${!packages[@]}; do
+                if yum list installed $package &> /dev/null; then
+                    echo "$package already installed"
+                else
+                    yum -y install $package
+                fi
+            done
+
+            set +e
+
+            setenforce 0
+
+            systemctl stop firewalld
+            systemctl disable firewalld
+            chmod +x /etc/rc.d/rc.local
+            systemctl enable rc-local
+            systemctl start rc-local
+
+            set -e
+
+            if ! id toolmgr; then
+                useradd toolmgr
+            fi
+            if ! id scl; then
+                useradd scl
+            fi
+
+            if [ ":${FsxMountOrigin}" != ":" ]; then
+                mkdir -p /fsx
+                if ! grep ' /fsx ' /etc/fstab; then
+                    echo "${FsxMountOrigin} /fsx lustre noatime,flock 0 0" >> /etc/fstab
+                    mount -a
+                fi
+
+                # Install Synopsys installer
+                if [ ! -e /synopsys/installer/installer ]; then
+                    mkdir /synopsys
+                    chown -R toolmgr:toolmgr ${SynopsysInstallerFsxPath}
+                    cd ${SynopsysInstallerFsxPath}
+                    chmod +x SynopsysInstaller_v5.1.run
+                    ./SynopsysInstaller_v5.1.run -dir /synopsys/installer
+
+                    echo 'export PATH=/synopsys/installer:$PATH' > /etc/profile.d/synopsys_installer.sh
+                fi
+
+                # Install Synopsys SCL
+                chown -R toolmgr:toolmgr ${SynopsysSCLFsxPath}
+                chown -R toolmgr:toolmgr /synopsys
+                cd ${SynopsysSCLFsxPath}
+                source /etc/profile.d/synopsys_installer.sh
+                yes | su -c "installer -batch_installer -source $(pwd) -target /synopsys" toolmgr
+
+                mkdir -p /synopsys/logs
+                mkdir -p /synopsys/licenses
+                mkdir -p /synopsys/gvfsd-fuse-mount
+                chown -R toolmgr:toolmgr /synopsys
+
+                if ! grep gvfsd-fuse /etc/rc.d/rc.local; then
+                    echo -e "\n/usr/libexec/gvfsd-fuse /synopsys/gvfsd-fuse-mount" >> /etc/rc.d/rc.local
+                    echo "pushd /synopsys/scl/2021.03/linux64/bin" >> /etc/rc.d/rc.local
+                    echo "./install_fnp.sh &> /synopsys/logs/install_fnp.log" >> /etc/rc.d/rc.local
+                    echo "popd" >> /etc/rc.d/rc.local
+                    echo "su centos -c '/synopsys/scl/2021.03/linux64/bin/lmgrd -l /synopsys/logs/license.log -c /synopsys/licenses/license.lic -reuseaddr'" >> /etc/rc.d/rc.local
+                fi
+            fi
+
+            if ! needs-restarting -r; then
+              reboot
+            fi
+
+Outputs:
+  InstanceId:
+    Value: !Ref LicenseServerInstance

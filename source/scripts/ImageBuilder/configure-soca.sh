@@ -4,10 +4,16 @@ scriptdir=$(dirname $(readlink -f $0))
 scriptsdir=$(readlink -f $scriptdir/..)
 socadir=$(readlink -f $scriptdir/../..)
 
+install_packages=${scriptdir}/install_packages.sh
+
 source /etc/environment
 
 function info {
     echo "$(date):INFO: $1"
+}
+
+function error {
+    echo "$(date):ERROR: $1"
 }
 
 if grep -q 'Amazon Linux release 2' /etc/system-release; then
@@ -23,7 +29,8 @@ info "BaseOS=$BaseOS"
 # Install epel
 info "Installing epel"
 if [ $BaseOS == "amazonlinux2" ]; then
-    amazon-linux-extras install -y epel
+    # The amazon-linux-extras version is missing figlet
+    yum install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-7.noarch.rpm
 elif [ $BaseOS == "centos7" ]; then
     yum -y install epel-release
 elif [ $BaseOS == "rhel7" ]; then
@@ -33,21 +40,26 @@ fi
 # Install ansible
 info "Installing ansible"
 if [ $BaseOS == "amazonlinux2" ]; then
-    amazon-linux-extras install -y ansible2
-else
-    yum -y install ansible
+    amazon-linux-extras enable ansible2
 fi
+yum -y install ansible
 
 # Install pip
-info "Installing pip"
-if ! which pip2.7; then
+if which pip2.7; then
+    echo "pip2.7 already installed"
+else
     echo "Installing pip2.7"
-    if [ "$BaseOS" == "centos7" ] || [ "$BaseOS" == "rhel7" ]; then
-        EASY_INSTALL=$(which easy_install-2.7)
-        $EASY_INSTALL pip
+fi
+if [ "$BaseOS" == "centos7" ] || [ "$BaseOS" == "rhel7" ]; then
+    if ! yum list installed python2-pip &> /dev/null; then
+        echo "Installing python2-pip"
+        # easy_install-2.7 installs a new version of pip that fails on python2.7
+        yum -y install python2-pip
     fi
 fi
 PIP=$(which pip2.7)
+# Make sure pip works
+$PIP --version
 
 # awscli is installed by the aws-cli-version-2-linux component
 AWS=$(which aws)
@@ -58,21 +70,13 @@ rm -rf /root/playbooks
 aws s3 cp --recursive s3://${SOCA_INSTALL_BUCKET}/${SOCA_INSTALL_BUCKET_FOLDER}/playbooks/ /root/playbooks/
 cd /root/playbooks
 
-# Configure Repository
-if [ ":$SOCA_REPOSITORY_BUCKET" = ":" ]; then
-    info "Repository bucket not configured"
-else
-    info "Configuring repository mirror"
-    ansible-playbook configure-repo-mirror.yml -e Region=${AWS_DEFAULT_REGION} -e Domain=${SOCA_DOMAIN} -e S3InstallBucket=${SOCA_INSTALL_BUCKET} -e S3InstallFolder=${SOCA_INSTALL_BUCKET_FOLDER} -e ClusterId=${SOCA_CONFIGURATION} -e NoProxy=${NO_PROXY} -e RepositoryBucket=${SOCA_REPOSITORY_BUCKET} -e RepositoryFolder=${SOCA_REPOSITORY_FOLDER} >> /root/ansible-configure-repo.log 2>&1
-fi
-
 # Install Lustre client
 if [ "$BaseOS" == "amazonlinux2" ]; then
     sudo amazon-linux-extras install -y lustre2.10
 elif [ "$BaseOS" == "centos7" ] || [ "$BaseOS" == "rhel7" ]; then
     curl https://fsx-lustre-client-repo-public-keys.s3.amazonaws.com/fsx-rpm-public-key.asc -o /tmp/fsx-rpm-public-key.asc
     rpm --import /tmp/fsx-rpm-public-key.asc
-    #curl https://fsx-lustre-client-repo.s3.amazonaws.com/el/7/fsx-lustre-client.repo -o /etc/yum.repos.d/aws-fsx.repo
+    curl https://fsx-lustre-client-repo.s3.amazonaws.com/el/7/fsx-lustre-client.repo -o /etc/yum.repos.d/aws-fsx.repo
     yum install -y kmod-lustre-client lustre-client
 fi
 
@@ -87,30 +91,41 @@ fi
 
 source $scriptsdir/config.cfg
 if [ "$BaseOS" == "rhel7" ]; then
+    yum-config-manager --enable rhui-REGION-rhel-server-optional
     yum-config-manager --enable rhel-7-server-rhui-optional-rpms
     yum-config-manager --enable rhel-7-server-rhui-rpms
 fi
 
 mkdir -p /root/logs
+
+rc=0
+
 info "Installing SYSTEM_PKGS"
-if ! yum install -y $(echo ${SYSTEM_PKGS[*]}) &> /root/logs/system_pkgs.log; then
+if ! $install_packages "yum list installed" "yum install -y" ${SYSTEM_PKGS[*]} &> /root/logs/system_pkgs.log; then
     cat /root/logs/system_pkgs.log
-    exit 1
+    rc=1
 fi
+
 info "Installing SCHEDULER_PKGS"
-if ! yum install -y $(echo ${SCHEDULER_PKGS[*]}) &> /root/logs/scheduler_pkgs.log; then
+if ! $install_packages "yum list installed" "yum install -y" ${SCHEDULER_PKGS[*]} &> /root/logs/scheduler_pkgs.log; then
     cat /root/logs/scheduler_pkgs.log
-    exit 1
+    rc=1
 fi
+
 info "Installing OPENLDAP_SERVER_PKGS"
-if ! yum install -y $(echo ${OPENLDAP_SERVER_PKGS[*]}) &> /root/logs/openldap_server_pkgs.log; then
+if ! $install_packages "yum list installed" "yum install -y" ${OPENLDAP_SERVER_PKGS[*]} &> /root/logs/openldap_server_pkgs.log; then
     cat /root/logs/openldap_server_pkgs.log
-    exit 1
+    rc=1
 fi
+
 info "Installing SSSD_PKGS"
-if ! yum install -y $(echo ${SSSD_PKGS[*]}) &> /root/logs/sssd_pkgs.log; then
+if ! $install_packages "yum list installed" "yum install -y" ${SSSD_PKGS[*]} &> /root/logs/sssd_pkgs.log; then
     cat /root/logs/sssd_pkgs.log
-    exit 1
+    rc=1
+fi
+if [ $rc != "0" ]; then
+    echo "error: Failed"
+    exit $rc
 fi
 mkdir -p /root/sem
 touch /root/sem/soca-packages-installed

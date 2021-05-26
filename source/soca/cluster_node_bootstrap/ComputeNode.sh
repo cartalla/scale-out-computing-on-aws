@@ -12,14 +12,32 @@ function info {
 }
 
 function error {
-    echo "$(date):INFO: $1"
+    echo "$(date):ERROR: $1"
 }
 
 info "Starting $0"
 
+# NOTE: In a private VPC you must use a custom AMI that already has everything installed.
+
+# Install SSM
+# Do this before anything else to make sure we can connect if something goes wrong.
+if ! systemctl status amazon-ssm-agent && ! yum list amazon-ssm-agent; then
+    info "Installing amazon-ssm-agent"
+    machine=$(uname -m)
+    if [[ $machine == "x86_64" ]]; then
+        yum install -y $SSM_X86_64_URL
+    elif [[ $machine == "aarch64" ]]; then
+        yum install -y $SSM_AARCH64_URL
+    fi
+    systemctl enable amazon-ssm-agent || true
+    systemctl restart amazon-ssm-agent
+fi
+
 source /etc/environment
 source /root/config.cfg
-source /etc/profile.d/proxy.sh
+if [ -e /etc/profile.d/proxy.sh ]; then
+    source /etc/profile.d/proxy.sh
+fi
 
 if [ $# -lt 1 ]
   then
@@ -32,7 +50,7 @@ SCHEDULER_HOSTNAME=$1
 scriptdir=$(dirname $(readlink -f $0))
 export SOCA_BASE_OS=$($scriptdir/get-base-os.sh)
 
-# In case AMI already have PBS installed, force it to stop
+# In case AMI already has PBS installed, force it to stop
 if systemctl status pbs; then
     info "Stopping pbs"
     systemctl stop pbs
@@ -40,14 +58,6 @@ if systemctl status pbs; then
 else
     info "pbs already stopped"
 fi
-
-# Install SSM
-if ! yum list amazon-ssm-agent; then
-    info "Installing amazon-ssm-agent"
-    yum install -y https://s3.${AWS_DEFAULT_REGION}.amazonaws.com/amazon-ssm-${AWS_DEFAULT_REGION}/latest/linux_amd64/amazon-ssm-agent.rpm
-fi
-systemctl enable amazon-ssm-agent || true
-systemctl restart amazon-ssm-agent
 
 AWS=$(which aws)
 
@@ -127,7 +137,7 @@ else
 	        # If only 1 instance store, mfks as ext4
 	        echo "Detected  1 NVMe device available, formatting as ext4 .."
 	        mkfs -t ext4 $VOLUME_LIST
-	        echo "$VOLUME_LIST /scratch ext4 defaults 0 0" >> /etc/fstab
+	        echo "$VOLUME_LIST /scratch ext4 defaults,nofail 0 0" >> /etc/fstab
 	    elif [[ $VOLUME_COUNT -gt 1 ]];
 	    then
 	        # if more than 1 instance store disks, raid them !
@@ -137,7 +147,7 @@ else
             echo yes | mdadm --create -f --verbose --level=0 --raid-devices=$VOLUME_COUNT /dev/$DEVICE_NAME ${VOLUME_LIST[@]}
             mkfs -t ext4 /dev/$DEVICE_NAME
             mdadm --detail --scan | tee -a /etc/mdadm.conf
-            echo "/dev/$DEVICE_NAME /scratch ext4 defaults 0 0" >> /etc/fstab
+            echo "/dev/$DEVICE_NAME /scratch ext4 defaults,nofail 0 0" >> /etc/fstab
         else
             echo "All volumes detected already have a partition or mount point and can't be used as scratch devices"
 	    fi

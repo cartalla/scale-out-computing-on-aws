@@ -6,8 +6,15 @@ Parameters:
 
   VpcCidr:
     Type: String
-  
-  SocaDomain:
+
+  PublicVpc:
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+
+  SocaLocalDomain:
     Type: String
 
   HostedZoneId:
@@ -32,7 +39,7 @@ Parameters:
     Type: String
 
   ProxySubnetId:
-    Type: AWS::EC2::Subnet::Id
+    Type: String
 
   NoProxy:
     Type: String
@@ -41,13 +48,13 @@ Parameters:
     Type: String
 
   PublicSubnet1:
-    Type: AWS::EC2::Subnet::Id
+    Type: String
 
   PublicSubnet2:
-    Type: AWS::EC2::Subnet::Id
+    Type: String
 
   PublicSubnet3:
-    Type: AWS::EC2::Subnet::Id
+    Type: String
 
   PrivateSubnet1:
     Type: AWS::EC2::Subnet::Id
@@ -67,9 +74,6 @@ Parameters:
   PrefixListId:
     Type: String
 
-  SchedulerPublicIP:
-    Type: String
-
   EIPNat:
     Type: String
 
@@ -82,12 +86,27 @@ Parameters:
   S3InstallFolder:
     Type: String
 
+  CreateESServiceRole:
+    Type: String
+
+  ErrorSnsTopicArn:
+    Type: String
+
+  ProxyCACertParameterName:
+    Type: String
+
 Conditions:
+  PublicVpc: !Equals [ !Ref PublicVpc, 'true' ]
+
+  PrivateVpc: !Equals [ !Ref PublicVpc, 'false' ]
+
+  CreateESServiceRoleCondition: !Equals [!Ref 'CreateESServiceRole', 'True']
+  
   HasClientIp:
-    !Not [ !Equals [ !Ref ClientIp, '' ] ]
+    !And [ {Condition: PublicVpc}, !Not [ !Equals [ !Ref ClientIp, '' ] ] ]
 
   HasPrefixListId:
-    !Not [ !Equals [ !Ref PrefixListId, '' ] ]
+    !And [ {Condition: PublicVpc}, !Not [ !Equals [ !Ref PrefixListId, '' ] ] ]
 
   HasRepository:
     !Not [ !Equals [ !Ref RepositoryBucket, '' ] ]
@@ -205,6 +224,7 @@ Resources:
             # NVidia drivers
             - !Sub "arn:aws:s3:::ec2-linux-nvidia-drivers"
             - !Sub "arn:aws:s3:::ec2-linux-nvidia-drivers/*"
+            - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}", !Ref 'AWS::NoValue' ]
             - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}/${RepositoryFolder}/*", !Ref 'AWS::NoValue' ]
 
         - Effect: Allow
@@ -247,6 +267,15 @@ Resources:
             - !Sub "arn:aws:s3:::${AWS::Region}-birdwatcher-prod/*"
             - !Sub "arn:aws:s3:::patch-baseline-snapshot-${AWS::Region}/*"
 
+        # DCV License
+        # https://docs.aws.amazon.com/dcv/latest/adminguide/setting-up-license.html#setting-up-license-ec2
+        - Effect: Allow
+          Principal: "*"
+          Action:
+            - "s3:GetObject"
+          Resource:
+            - !Sub "arn:aws:s3:::dcv-license.${AWS::Region}/*"
+
   VpcEndpointSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -258,7 +287,7 @@ Resources:
           Value: !Ref ClusterId
       VpcId: !Ref VpcId
 
-  VpcEndpointIgressBastionHTTPS:
+  VpcEndpointIngressBastionHTTPS:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -289,6 +318,7 @@ Resources:
       Description: "ImageBuilder"
 
   VpcEndpointIngressProxyHTTPS:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -375,6 +405,54 @@ Resources:
   #           StringEquals:
   #             "aws:PrincipalAccount": !Ref "AWS::AccountId"
 
+  DataSyncVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.datasync"
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      # PolicyDocument:
+      #   Version: "2012-10-17"
+      #   Statement:
+      #   - Effect: Allow
+      #     Principal: "*"
+      #     Action:
+      #       - "*"
+      #     Resource:
+      #       - "*"
+      #     Condition:
+      #       StringEquals:
+      #         "aws:PrincipalAccount": !Ref "AWS::AccountId"
+
+  # EC2 sends traffic to scheduler
+  EC2VpcEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "EC2 VPC Endpoint"
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterId}-EC2VpcEndpointsSG"
+        - Key: soca:ClusterId
+          Value: !Ref ClusterId
+      VpcId: !Ref VpcId
+
+  EC2VpcEndpointEgressScheduler:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !GetAtt SchedulerSecurityGroup.GroupId
+      GroupId: !GetAtt EC2VpcEndpointSecurityGroup.GroupId
+      Description: VpcEndpoint
+
   EC2VpcEndpoint:
     Type: AWS::EC2::VPCEndpoint
     Properties:
@@ -384,6 +462,7 @@ Resources:
       PrivateDnsEnabled: true
       SecurityGroupIds:
         - !Ref VpcEndpointSecurityGroup
+        - !Ref EC2VpcEndpointSecurityGroup
       SubnetIds:
         - !Ref PrivateSubnet1
         - !Ref PrivateSubnet2
@@ -428,31 +507,57 @@ Resources:
       #       StringEquals:
       #         "aws:PrincipalAccount": !Ref "AWS::AccountId"
 
-  # ElasticFileSystemVpcEndpoint:
-  #   Type: AWS::EC2::VPCEndpoint
-  #   Properties:
-  #     ServiceName: !Sub "com.amazonaws.${AWS::Region}.elasticfilesystem"
-  #     VpcEndpointType: Interface
-  #     VpcId: !Ref VpcId
-  #     PrivateDnsEnabled: true
-  #     SecurityGroupIds:
-  #       - !Ref VpcEndpointSecurityGroup
-  #     SubnetIds:
-  #       - !Ref PrivateSubnet1
-  #       - !Ref PrivateSubnet2
-  #       - !Ref PrivateSubnet3
-  #     PolicyDocument:
-  #       Version: "2012-10-17"
-  #       Statement:
-  #       - Effect: Allow
-  #         Principal: "*"
-  #         Action:
-  #           - "*"
-  #         Resource:
-  #           - "*"
-  #         Condition:
-  #           StringEquals:
-  #             "aws:PrincipalAccount": !Ref "AWS::AccountId"
+  ElasticFileSystemVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.elasticfilesystem"
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: Allow
+          Principal: "*"
+          Action:
+            - "*"
+          Resource:
+            - "*"
+          Condition:
+            StringEquals:
+              "aws:PrincipalAccount": !Ref "AWS::AccountId"
+
+  ElasticLoadBalancingVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.elasticloadbalancing"
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      # PolicyDocument:
+      #   Version: "2012-10-17"
+      #   Statement:
+      #   - Effect: Allow
+      #     Principal: "*"
+      #     Action:
+      #       - "*"
+      #     Resource:
+      #       - "*"
+      #     Condition:
+      #       StringEquals:
+      #         "aws:PrincipalAccount": !Ref "AWS::AccountId"
 
   LogsVpcEndpoint:
     Type: AWS::EC2::VPCEndpoint
@@ -479,6 +584,33 @@ Resources:
           Condition:
             StringEquals:
               "aws:PrincipalAccount": !Ref "AWS::AccountId"
+
+  # CloudWatch metrics endpoint
+  MonitoringVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.monitoring"
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      # PolicyDocument:
+      #   Version: "2012-10-17"
+      #   Statement:
+      #   - Effect: Allow
+      #     Principal: "*"
+      #     Action:
+      #       - "*"
+      #     Resource:
+      #       - "*"
+      #     Condition:
+      #       StringEquals:
+      #         "aws:PrincipalAccount": !Ref "AWS::AccountId"
 
   SecretsManagerVpcEndpoint:
     Type: AWS::EC2::VPCEndpoint
@@ -560,11 +692,66 @@ Resources:
       #       StringEquals:
       #         "aws:PrincipalAccount": !Ref "AWS::AccountId"
 
+  SNSMessagesVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.sns"
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      # Service com.amazonaws.us-east-1.ssm only supports the full-access endpoint policy.
+      # PolicyDocument:
+      #   Version: "2012-10-17"
+      #   Statement:
+      #   - Effect: Allow
+      #     Principal: "*"
+      #     Action:
+      #       - "*"
+      #     Resource:
+      #       - "*"
+      #     Condition:
+      #       StringEquals:
+      #         "aws:PrincipalAccount": !Ref "AWS::AccountId"
+
+  StorageGatewayMessagesVpcEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.storagegateway"
+      VpcEndpointType: Interface
+      VpcId: !Ref VpcId
+      PrivateDnsEnabled: true
+      SecurityGroupIds:
+        - !Ref VpcEndpointSecurityGroup
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      # Service com.amazonaws.us-east-1.ssm only supports the full-access endpoint policy.
+      # PolicyDocument:
+      #   Version: "2012-10-17"
+      #   Statement:
+      #   - Effect: Allow
+      #     Principal: "*"
+      #     Action:
+      #       - "*"
+      #     Resource:
+      #       - "*"
+      #     Condition:
+      #       StringEquals:
+      #         "aws:PrincipalAccount": !Ref "AWS::AccountId"
+
   #============================================================================
   # Bastion server
   #============================================================================
 
   BastionNLB:
+    Condition: PublicVpc
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       Scheme: internet-facing
@@ -588,7 +775,7 @@ Resources:
   # health checks
   #============================================================================
 
-  GetNLBPrivateIPLambdaRole:
+  GetELBPrivateIPLambdaRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -621,14 +808,14 @@ Resources:
                 Resource:
                   - '*'
 
-  GetNLBPrivateIPLambda:
+  GetELBPrivateIPLambda:
     Type: AWS::Lambda::Function
     Properties:
-      Description: Get NLB private ip addresses
-      FunctionName: !Sub "${ClusterId}-GetNLBPrivateIP"
+      Description: "Get ELB private ip addresses. Required Parameters: LoadBalancerArn, VpcId, SubnetId"
+      FunctionName: !Sub "${ClusterId}-GetELBPrivateIP"
       Handler: index.lambda_handler
       MemorySize: 128
-      Role: !GetAtt GetNLBPrivateIPLambdaRole.Arn
+      Role: !GetAtt GetELBPrivateIPLambdaRole.Arn
       Runtime: python3.7
       Timeout: 180
       Tags:
@@ -653,17 +840,23 @@ Resources:
                 return
               loadBalancerArn = event['ResourceProperties']['LoadBalancerArn']
               logging.info("loadBalancerArn: " + loadBalancerArn)
+              vpcId = event['ResourceProperties']['VpcId']
+              logging.info("vpcId: " + vpcId)
               subnetId = event['ResourceProperties']['SubnetId']
               logging.info("subnetId: " + subnetId)
 
               loadBalancerId = re.sub(r'^.+:loadbalancer/', '', loadBalancerArn)
               logging.info("loadBalancerId: " + loadBalancerId)
               ec2_client = boto3.client('ec2')
-              response = ec2_client.describe_network_interfaces(Filters=[
-                  {'Name': 'description', 'Values': ['ELB ' + loadBalancerId]},
-                  {'Name': 'subnet-id', 'Values': [subnetId]},
-                ])
+              filters = [
+                {'Name': 'description', 'Values': ['ELB ' + loadBalancerId]},
+                {'Name': 'vpc-id', 'Values': [vpcId]}
+              ]
+              if subnetId:
+                filters.append({'Name': 'subnet-id', 'Values': [subnetId]})
+              response = ec2_client.describe_network_interfaces(Filters=filters)
               ipAddresses = []
+              subnetIpAddresses = []
               for networkInterface in response['NetworkInterfaces']:
                 logging.debug(networkInterface)
                 az = networkInterface['AvailabilityZone']
@@ -673,45 +866,55 @@ Resources:
                   ipAddress = privateIpAddress['PrivateIpAddress']
                   logging.info("ipAddress:" + ipAddress)
                   ipAddresses.append(ipAddress)
-              if len(ipAddresses) == 0:
+                  subnetIpAddresses.append(ipAddress)
+              if len(subnetIpAddresses) == 0:
                 msg = "No IP addresses found"
                 logging.error(msg)
                 cfnresponse.send(event, context, cfnresponse.FAILED, {'error': msg}, msg)
                 return
-              elif len(ipAddresses) != 1:
-                msg = "More than 1 IP address found"
-                logging.error(msg)
-                cfnresponse.send(event, context, cfnresponse.FAILED, {'error': msg}, msg)
-                return
-              else:
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, {'IpAddress': ipAddresses[0]}, ipAddresses[0])
+              elif subnetId and len(subnetIpAddresses) != 1:
+                msg = "More than 1 IP address found in " + subnetId
+                logging.warning(msg)
+                #cfnresponse.send(event, context, cfnresponse.FAILED, {'error': msg}, msg)
+                #return
+              targets = []
+              for ipAddress in ipAddresses:
+                targets.append({'Id': ipAddress})
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {'IpAddress': subnetIpAddresses[0], 'IpAddresses': ipAddresses, 'Targets': targets})
             except:
               logging.exception("Caught exception")
               error_message = 'Exception getting NLB private IP addresses id for {}'.format(loadBalancerArn)
               cfnresponse.send(event, context, cfnresponse.FAILED, {'error': error_message}, error_message)
 
-  BastionNLB1CustomResource:
+  BastionNLBEniPublicSubnet1:
+    Condition: PublicVpc
     Type: AWS::CloudFormation::CustomResource
     Properties:
-      ServiceToken: !GetAtt GetNLBPrivateIPLambda.Arn
+      ServiceToken: !GetAtt GetELBPrivateIPLambda.Arn
       LoadBalancerArn: !Ref BastionNLB
+      VpcId: !Ref VpcId
       SubnetId: !Ref PublicSubnet1
 
-  BastionNLB2CustomResource:
+  BastionNLBEniPublicSubnet2:
+    Condition: PublicVpc
     Type: AWS::CloudFormation::CustomResource
     Properties:
-      ServiceToken: !GetAtt GetNLBPrivateIPLambda.Arn
+      ServiceToken: !GetAtt GetELBPrivateIPLambda.Arn
       LoadBalancerArn: !Ref BastionNLB
+      VpcId: !Ref VpcId
       SubnetId: !Ref PublicSubnet2
 
-  BastionNLB3CustomResource:
+  BastionNLBEniPublicSubnet3:
+    Condition: PublicVpc
     Type: AWS::CloudFormation::CustomResource
     Properties:
-      ServiceToken: !GetAtt GetNLBPrivateIPLambda.Arn
+      ServiceToken: !GetAtt GetELBPrivateIPLambda.Arn
       LoadBalancerArn: !Ref BastionNLB
+      VpcId: !Ref VpcId
       SubnetId: !Ref PublicSubnet3
 
   BastionNLBTargetGroup:
+    Condition: PublicVpc
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       Protocol: TCP
@@ -728,6 +931,7 @@ Resources:
           Value: !Sub ${ClusterId}
 
   BastionNLBListener:
+    Condition: PublicVpc
     Type: AWS::ElasticLoadBalancingV2::Listener
     Properties:
       DefaultActions: 
@@ -766,6 +970,8 @@ Resources:
                 Resource:
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket , "/*" ] ]
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket] ]
+                  - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}", !Ref 'AWS::NoValue' ]
+                  - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}/${RepositoryFolder}/*", !Ref 'AWS::NoValue' ]
 
               - Effect: Allow
                 Action:
@@ -779,6 +985,21 @@ Resources:
                   - ec2:DescribeVolumes
                   - ec2:DescribeNetworkInterfaces
                 Resource: "*"
+
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProxyCACertParameterName}"
+
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref ErrorSnsTopicArn
+                Condition:
+                  "ForAllValues:ArnEqualsIfExists":
+                      "ec2:Vpc": !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:*:vpc/${VpcId}"
 
   BastionIAMInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -799,35 +1020,38 @@ Resources:
           Value: !Ref ClusterId
 
   BastionIngressNLB1SSH:
+    Condition: PublicVpc
     # Used for health checks
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
       FromPort: 22
       ToPort: 22
-      CidrIp: !Join ["", [!GetAtt BastionNLB1CustomResource.IpAddress, "/32"] ]
+      CidrIp: !Join ["", [!GetAtt BastionNLBEniPublicSubnet1.IpAddress, "/32"] ]
       GroupId: !GetAtt BastionSecurityGroup.GroupId
       Description: "NLB1"
 
   BastionIngressNLB2SSH:
+    Condition: PublicVpc
     # Used for health checks
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
       FromPort: 22
       ToPort: 22
-      CidrIp: !Join ["", [!GetAtt BastionNLB2CustomResource.IpAddress, "/32"] ]
+      CidrIp: !Join ["", [!GetAtt BastionNLBEniPublicSubnet2.IpAddress, "/32"] ]
       GroupId: !GetAtt BastionSecurityGroup.GroupId
       Description: "NLB2"
 
   BastionIngressNLB3SSH:
+    Condition: PublicVpc
     # Used for health checks
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
       FromPort: 22
       ToPort: 22
-      CidrIp: !Join ["", [!GetAtt BastionNLB3CustomResource.IpAddress, "/32"] ]
+      CidrIp: !Join ["", [!GetAtt BastionNLBEniPublicSubnet3.IpAddress, "/32"] ]
       GroupId: !GetAtt BastionSecurityGroup.GroupId
       Description: "NLB3"
 
@@ -894,14 +1118,29 @@ Resources:
           "Fn::Base64": !Sub |
             #!/bin/bash -xe
 
+            # Notify user of errors
+            function on_exit {
+                rc=$?
+                set +e
+                if [[ $rc -ne 0 ]]; then
+                    aws sns publish --topic-arn ${ErrorSnsTopicArn} --subject "${ClusterId} Bastion UserData failed" --message "See /var/log/cloud-init.log or grep cloud-init /var/log/messages | less for more info."
+                fi
+            }
+            trap on_exit EXIT
+
+            # Update to latest ssm agent
+            if yum install -y https://s3.${AWS::Region}.amazonaws.com/amazon-ssm-${AWS::Region}/latest/linux_amd64/amazon-ssm-agent.rpm; then
+                systemctl restart amazon-ssm-agent
+            fi
+
             echo export "AWS_DEFAULT_REGION=${AWS::Region}" >> /etc/environment
             echo export "NO_PROXY=${NoProxy}" >> /etc/environment
             echo export "SOCA_CLOUDFORMATION_STACK=${AWS::StackName}" >> /etc/environment
             echo export "SOCA_CONFIGURATION=${ClusterId}" >> /etc/environment
-            echo export "SOCA_DOMAIN=${SocaDomain}" >> /etc/environment
             echo export "SOCA_HOSTED_ZONE_ID=${HostedZoneId}" >> /etc/environment
             echo export "SOCA_INSTALL_BUCKET=${S3InstallBucket}" >> /etc/environment
             echo export "SOCA_INSTALL_BUCKET_FOLDER=${S3InstallFolder}" >> /etc/environmentenvironment
+            echo export "SOCA_LOCAL_DOMAIN=${SocaLocalDomain}" >> /etc/environment
             echo export "SOCA_REPOSITORY_BUCKET=${RepositoryBucket}" >> /etc/environment
             echo export "SOCA_REPOSITORY_FOLDER=${RepositoryFolder}" >> /etc/environment
 
@@ -909,20 +1148,16 @@ Resources:
 
             # Configure using ansible
             # This can be done before configuring the proxy because S3 is accessed using the S3 VPC endpoint
-            amazon-linux-extras install -y ansible2
+            amazon-linux-extras enable ansible2
+            yum -y install ansible
             rm -rf /root/playbooks
             aws s3 cp --recursive s3://${S3InstallBucket}/${S3InstallFolder}/playbooks/ /root/playbooks/
             cd /root/playbooks
-            ansible-playbook bastion.yml -e Region=${!AWS_DEFAULT_REGION} -e Domain=${!SOCA_DOMAIN} -e S3InstallBucket=${!SOCA_INSTALL_BUCKET} -e S3InstallFolder=${!SOCA_INSTALL_BUCKET_FOLDER} -e ClusterId=${!SOCA_CONFIGURATION} -e NoProxy=${!NO_PROXY} -e NodeType=bastion >> /root/ansible.log 2>&1
+            ansible-playbook /root/playbooks/bastion.yml -e Region=${!AWS_DEFAULT_REGION} -e RepositoryBucket=${!SOCA_REPOSITORY_BUCKET} -e RepositoryFolder=${!SOCA_REPOSITORY_FOLDER} -e Domain=${!SOCA_LOCAL_DOMAIN} -e S3InstallBucket=${!SOCA_INSTALL_BUCKET} -e S3InstallFolder=${!SOCA_INSTALL_BUCKET_FOLDER} -e ClusterId=${!SOCA_CONFIGURATION} -e PublicVpc=${PublicVpc} -e ProxyCACertParameterName=${ProxyCACertParameterName} -e NoProxy=${!NO_PROXY} -e NodeType=bastion >> /root/ansible.log 2>&1
 
-            source /etc/profile.d/proxy.sh
-
-            # Signal Cloudformation if the instance creates successfully or not
-            yum -y install -y aws-cfn-bootstrap
-            function on_exit {
-                /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionAutoScalingGroup --region ${AWS::Region} || true
-            }
-            trap on_exit EXIT
+            if [ -e /etc/profile.d/proxy.sh ]; then
+                source /etc/profile.d/proxy.sh
+            fi
 
             # Tag EBS disks manually as CFN ASG does not support it
             AWS_AVAIL_ZONE=$(curl http://169.254.169.254/latest/meta-data/placement/availability-zone)
@@ -938,38 +1173,67 @@ Resources:
             # Set up motd
             # Cloud init apparently overwrites it after UserData is run so create a script to run it after reboot.
             # Will make sure that there is a reboot so motd gets updated
-            if amazon-linux-extras install -y epel; then
-              yum -y install figlet
-              figlet -f slant "SOCA Bastion" > /etc/motd
-            else
-              echo "SOCA Bastion" > /etc/motd
+            if ! yum list installed figlet &> /dev/null; then
+                yum -y install figlet
             fi
+            figlet -f slant "SOCA Bastion" > /etc/motd
             echo -e "Cluster: ${ClusterId}
             > ssh username@hostname
             > ssh username@privateip
             " >> /etc/motd
 
-            /opt/aws/bin/cfn-signal -e 0 --stack ${AWS::StackName} --resource BastionAutoScalingGroup --region ${AWS::Region} || true
-            
             if ! needs-restarting -r; then
               reboot
             fi
 
-  BastionAutoScalingGroup:
+  BastionAutoScalingGroupPublic:
+    Condition: PublicVpc
     # Create the Proxy first because the bastion is in a private subnet and should be proxied too.
     DependsOn:
       - BastionIngressNLB1SSH
       - BastionIngressNLB2SSH
+      - BastionIngressNLB3SSH
       - EC2VpcEndpoint
       - ProxyEC2Instance
       - ProxyIngressBastionSquid
       - S3VpcEndpoint
-      - VpcEndpointIgressBastionHTTPS
+      - VpcEndpointIngressBastionHTTPS
     Type: AWS::AutoScaling::AutoScalingGroup
-    CreationPolicy:
-      ResourceSignal:
-        Count: 1
-        Timeout: PT10M
+    Properties:
+      MinSize: "1"
+      DesiredCapacity: "1"
+      MaxSize: "1"
+      HealthCheckGracePeriod: 300
+      HealthCheckType: ELB
+      LaunchTemplate:
+          LaunchTemplateId: !Ref BastionLaunchTemplate
+          Version: !GetAtt BastionLaunchTemplate.LatestVersionNumber
+      # 1 day
+      MaxInstanceLifetime: 86400
+      # 7 days
+      #MaxInstanceLifetime: 604800
+      VPCZoneIdentifier: 
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+        - !Ref PrivateSubnet3
+      Tags:
+        - Key: Name
+          Value: !Sub "${ClusterId}-Bastion"
+          PropagateAtLaunch: true
+        - Key: soca:ClusterId
+          Value: !Sub ${ClusterId}
+          PropagateAtLaunch: true
+      TargetGroupARNs: 
+        - !Ref BastionNLBTargetGroup
+
+  BastionAutoScalingGroupPrivate:
+    Condition: PrivateVpc
+    # Create the Proxy first because the bastion is in a private subnet and should be proxied too.
+    DependsOn:
+      - EC2VpcEndpoint
+      - S3VpcEndpoint
+      - VpcEndpointIngressBastionHTTPS
+    Type: AWS::AutoScaling::AutoScalingGroup
     Properties:
       MinSize: "1"
       DesiredCapacity: "1"
@@ -991,8 +1255,6 @@ Resources:
         - Key: soca:ClusterId
           Value: !Sub ${ClusterId}
           PropagateAtLaunch: true
-      TargetGroupARNs: 
-        - !Ref BastionNLBTargetGroup
 
   #============================================================================
   # ImageBuilder Security Group
@@ -1032,6 +1294,7 @@ Resources:
       Description: "Allow SSH traffic from client IP to master host"
 
   ImageBuilderIngressBastionSSH:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -1046,8 +1309,10 @@ Resources:
   #============================================================================
 
   ProxyEC2Instance:
+    Condition: PublicVpc
     DependsOn:
       - EC2VpcEndpoint
+      - ProxyCACertParameter
       - ProxyEgressInternetHTTP
       - ProxyEgressInternetHTTPS
       - ProxyEgressS3Http
@@ -1057,6 +1322,7 @@ Resources:
       - S3VpcEndpoint
       - VpcEndpointIngressProxyHTTPS
     Type: AWS::EC2::Instance
+    # The CreationPolicy is required so that the ProxyCACertLambda doesn't run before it creates the cert
     CreationPolicy:
       ResourceSignal:
         Count: '1'
@@ -1100,29 +1366,43 @@ Resources:
             #!/bin/bash -xe
 
             # Signal Cloudformation if the instance creates successfully or not
+            # Notify user of errors
             yum -y install -y aws-cfn-bootstrap
             function on_exit {
-                /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ProxyEC2Instance --region ${AWS::Region} || true
+                rc=$?
+                set +e
+                /opt/aws/bin/cfn-signal -e $rc --stack ${AWS::StackName} --resource ProxyEC2Instance --region ${AWS::Region}
+                if [[ $rc -ne 0 ]]; then
+                    aws sns publish --topic-arn ${ErrorSnsTopicArn} --subject "${ClusterId} Proxy UserData failed" --message "See /var/log/cloud-init.log or grep cloud-init /var/log/messages | less for more info."
+                fi
             }
             trap on_exit EXIT
 
+            # Update to latest ssm agent
+            if yum install -y https://s3.${AWS::Region}.amazonaws.com/amazon-ssm-${AWS::Region}/latest/linux_amd64/amazon-ssm-agent.rpm; then
+                systemctl restart amazon-ssm-agent
+            fi
+
+            rm -f /etc/environment
             echo export "AWS_DEFAULT_REGION=${AWS::Region}" >> /etc/environment
             echo export "NO_PROXY=${NoProxy}" >> /etc/environment
             echo export "SOCA_CONFIGURATION=${ClusterId}" >> /etc/environment
-            echo export "SOCA_DOMAIN=${SocaDomain}" >> /etc/environment
-            echo export "SOCA_INSTALL_BUCKET=${S3InstallBucket}" >> /etc/environment
-            echo export "SOCA_INSTALL_BUCKET_FOLDER=${S3InstallFolder}" >> /etc/environmentenvironment
-            echo export "SOCA_DOMAIN=${SocaDomain}" >> /etc/environment
             echo export "SOCA_HOSTED_ZONE_ID=${HostedZoneId}" >> /etc/environment
+            echo export "SOCA_INSTALL_BUCKET=${S3InstallBucket}" >> /etc/environment
+            echo export "SOCA_INSTALL_BUCKET_FOLDER=${S3InstallFolder}" >> /etc/environment
+            echo export "SOCA_LOCAL_DOMAIN=${SocaLocalDomain}" >> /etc/environment
+            echo export "SOCA_REPOSITORY_BUCKET=${RepositoryBucket}" >> /etc/environment
+            echo export "SOCA_REPOSITORY_FOLDER=${RepositoryFolder}" >> /etc/environment
 
             source /etc/environment
 
             # Configure using ansible
-            amazon-linux-extras install -y ansible2
+            amazon-linux-extras enable ansible2
+            yum -y install ansible
             rm -rf /root/playbooks
             aws s3 cp --recursive s3://${S3InstallBucket}/${S3InstallFolder}/playbooks/ /root/playbooks/
             cd /root/playbooks
-            ansible-playbook proxy.yml -e Region=${!AWS_DEFAULT_REGION} -e Domain=${!SOCA_DOMAIN} -e S3InstallBucket=${!SOCA_INSTALL_BUCKET} -e S3InstallFolder=${!SOCA_INSTALL_BUCKET_FOLDER} -e ClusterId=${!SOCA_CONFIGURATION} -e NodeType=proxy >> /root/ansible.log 2>&1
+            ansible-playbook /root/playbooks/proxy.yml -e Region=${!AWS_DEFAULT_REGION} -e RepositoryBucket=${!SOCA_REPOSITORY_BUCKET} -e RepositoryFolder=${!SOCA_REPOSITORY_FOLDER} -e Domain=${!SOCA_LOCAL_DOMAIN} -e S3InstallBucket=${!SOCA_INSTALL_BUCKET} -e S3InstallFolder=${!SOCA_INSTALL_BUCKET_FOLDER} -e ClusterId=${!SOCA_CONFIGURATION} -e PublicVpc=${PublicVpc} -e ProxyCACertParameterName=${ProxyCACertParameterName} -e NodeType=proxy >> /root/ansible.log 2>&1
 
             # Disable automatic motd update
             /usr/sbin/update-motd --disable
@@ -1130,8 +1410,9 @@ Resources:
             rm -f /etc/update-motd.d/*
 
             # Set up motd
-            amazon-linux-extras install -y epel
-            yum -y install figlet
+            if ! yum list installed figlet &> /dev/null; then
+                yum -y install figlet
+            fi
             figlet -f slant "SOCA Proxy" > /etc/motd
             echo -e "Cluster: ${ClusterId}
             Configuration: /etc/squid/squid.conf
@@ -1159,106 +1440,38 @@ Resources:
             fi
 
   ProxyDnsRecord:
+    Condition: PublicVpc
     Type: AWS::CloudFormation::CustomResource
     Properties:
       ServiceToken: !Ref UpdateDnsLambdaArn
       Hostname: "proxy"
-      Domain: !Ref SocaDomain
+      Domain: !Ref SocaLocalDomain
       HostedZoneId: !Ref HostedZoneId
       Type: 'A'
-      PrivateIP: !GetAtt ProxyEC2Instance.PrivateIp
+      Value: !GetAtt ProxyEC2Instance.PrivateIp
 
   #============================================================================
-  # Custom resource to get proxy CA certificate generated by proxy server
+  # SSM Parameter where the proxy stores the proxy CA certificate generated by proxy server.
   # This is used by the bastion and all other proxied instances so they can
   # use the proxy.
   #============================================================================
 
-  GetProxyCACertLambdaRole:
-    Type: AWS::IAM::Role
+  ProxyCACertParameter:
+    Type: AWS::SSM::Parameter
     Properties:
-      AssumeRolePolicyDocument:
-        Version: 2012-10-17
-        Statement:
-          - Effect: Allow
-            Principal:
-              Service:
-                - lambda.amazonaws.com
-            Action:
-              - sts:AssumeRole
-      Policies:
-        - PolicyName: GetProxyCACert
-          PolicyDocument:
-            Version: 2012-10-17
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogGroup
-                  - logs:CreateLogStream
-                  - logs:DeleteLogStream
-                  - logs:PutLogEvents
-                Resource:
-                  - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":logs:", !Ref "AWS::Region", ":", !Ref  "AWS::AccountId", ":log-group:/aws/lambda/", !Ref ClusterId, "*"] ]
-
-              - Effect: Allow
-                Action:
-                  - ssm:DeleteParameter
-                  - ssm:GetParameter
-                Resource:
-                  - !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ClusterId}/proxy/cacert'
-
-  GetProxyCACertLambda:
-    Type: AWS::Lambda::Function
-    Properties:
-      Description: Get proxy CA certificate
-      FunctionName: !Sub "${ClusterId}-GetProxyCACert"
-      Handler: index.lambda_handler
-      MemorySize: 128
-      Role: !GetAtt GetProxyCACertLambdaRole.Arn
-      Runtime: python3.7
-      Timeout: 180
+      Description: "Proxy CA Certificate"
+      Name: !Ref ProxyCACertParameterName
+      Type: String
+      Value: "UNDEFINED"
       Tags:
-        - Key: soca:ClusterId
-          Value: !Ref ClusterId
-      Code:
-        ZipFile: !Sub |
-          import cfnresponse
-          import boto3
-          import logging
-          '''
-          Get prefix list id
-          '''
-          logging.getLogger().setLevel(logging.INFO)
-          def lambda_handler(event, context):
-            try:
-              logging.info("event: {}".format(event))
-              ssm_client = boto3.client('ssm')
-              parameterName = '/${ClusterId}/proxy/cacert'
-              requestType = event['RequestType']
-              if requestType in ['Create', 'Update']:
-                proxyCACert = ssm_client.get_parameter(Name=parameterName)['Parameter']['Value']
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, {'cacert': proxyCACert}, parameterName)
-              elif requestType == 'Delete':
-                ssm_client.delete_parameter(Name=parameterName)
-                cfnresponse.send(event, context, cfnresponse.SUCCESS, {'cacert': ''}, parameterName)
-              else:
-                raise ValueError('Invalid RequestType: {}'.format(event['RequestType']))
-            except:
-              logging.exception("Unhandled exception")
-              error_message = 'Exception getting /${ClusterId}/proxy/cacert'
-              cfnresponse.send(event, context, cfnresponse.FAILED, {'error': error_message}, error_message)
-
-  ProxyCACert:
-    DependsOn: ProxyEC2Instance
-    Type: AWS::CloudFormation::CustomResource
-    Properties:
-      ServiceToken: !GetAtt GetProxyCACertLambda.Arn
+        "soca:ClusterId": !Ref ClusterId
 
   #============================================================================
   # Proxy Security Group
   #============================================================================
 
   ProxySecurityGroup:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroup
     Properties:
       VpcId: !Ref VpcId
@@ -1270,6 +1483,7 @@ Resources:
           Value: !Ref ClusterId
 
   ProxyIngressBastionSquid:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -1280,6 +1494,7 @@ Resources:
       Description: "Bastion"
 
   ProxyInboundRuleComputeNode:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -1290,6 +1505,7 @@ Resources:
       Description: "ComputeNode"
 
   ProxyInboundRuleScheduler:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -1299,8 +1515,8 @@ Resources:
       GroupId: !GetAtt ProxySecurityGroup.GroupId
       Description: "Scheduler"
 
-  ProxyIgressBastionSSH:
-    Condition: HasClientIp
+  ProxyIngressBastionSSH:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -1311,6 +1527,7 @@ Resources:
       Description: "Bastion"
 
   ProxyEgressInternetHTTP:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1321,6 +1538,7 @@ Resources:
       Description: Internet
 
   ProxyEgressInternetHTTPS:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1331,6 +1549,7 @@ Resources:
       Description: Internet
 
   ProxyEgressS3Http:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1341,6 +1560,7 @@ Resources:
       Description: "S3 Endpoints"
 
   ProxyEgressS3Https:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1351,6 +1571,7 @@ Resources:
       Description: "S3 Endpoints"
 
   ProxyEgressVpcEndpointHTTP:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1361,6 +1582,7 @@ Resources:
       Description: VpcEndpoint
 
   ProxyEgressVpcEndpointHTTPS:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1369,6 +1591,61 @@ Resources:
       DestinationSecurityGroupId: !GetAtt VpcEndpointSecurityGroup.GroupId
       GroupId: !GetAtt ProxySecurityGroup.GroupId
       Description: VpcEndpoint
+
+  #============================================================================
+  # LDAP Security Group
+  #============================================================================
+
+  LDAPSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: LDAP
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterId}-LDAPSG
+        - Key: soca:ClusterId
+          Value: !Ref ClusterId
+
+  #============================================================================
+  # WebUI Security Group
+  #============================================================================
+
+  WebUISecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: WebUI
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterId}-WebUISG
+        - Key: soca:ClusterId
+          Value: !Ref ClusterId
+
+  #============================================================================
+  # ElasticSearch Security Group
+  #============================================================================
+
+  ElasticSearchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      VpcId: !Ref VpcId
+      GroupDescription: ElasticSearch
+      Tags:
+        - Key: Name
+          Value: !Sub ${ClusterId}-ES
+        - Key: soca:ClusterId
+          Value: !Ref ClusterId
+
+  ElasticSearchInboundRuleLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
+      GroupId: !GetAtt ElasticSearchSecurityGroup.GroupId
+      Description: "LoadBalancer - Allow ELB healthcheck"
 
   #============================================================================
   # Scheduler Security Group
@@ -1402,7 +1679,17 @@ Resources:
       ToPort: 8443
       SourceSecurityGroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
       GroupId: !GetAtt SchedulerSecurityGroup.GroupId
-      Description: "LoadBalancer - Allow ELB healtcheck to communicate with web ui on master host"
+      Description: "LoadBalancer - Allow ELB healthcheck to communicate with web ui on master host"
+
+  SchedulerInboundRuleEC2Endpoint:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt EC2VpcEndpointSecurityGroup.GroupId
+      GroupId: !GetAtt SchedulerSecurityGroup.GroupId
+      Description: "EC2VpcEndpoint"
 
   SchedulerInboundRuleComputeNodeLDAP:
     Type: AWS::EC2::SecurityGroupIngress
@@ -1425,7 +1712,6 @@ Resources:
       Description: "ComputeNode"
 
   SchedulerInboundRuleAllowBastionSSH:
-    Condition: HasClientIp
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -1512,6 +1798,7 @@ Resources:
       Description: ComputeNode
 
   SchedulerOutboundProxy:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1561,6 +1848,16 @@ Resources:
       GroupId: !GetAtt SchedulerSecurityGroup.GroupId
       Description: "S3 Endpoints"
 
+  SchedulerOutboundLoadBalancer:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      DestinationSecurityGroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
+      GroupId: !GetAtt SchedulerSecurityGroup.GroupId
+      Description: "LoadBalancer"
+
   SchedulerOutboundInternetHttps:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
@@ -1569,7 +1866,7 @@ Resources:
       ToPort: 443
       CidrIp: '0.0.0.0/0'
       GroupId: !GetAtt SchedulerSecurityGroup.GroupId
-      Description: "S3 Endpoints"
+      Description: "Internet - LoadBalancer"
 
   #============================================================================
   # ComputeNode Security Group
@@ -1691,6 +1988,7 @@ Resources:
       Description: "Scheduler Ephemeral"
 
   ComputeNodeOutboundProxy:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1720,7 +2018,7 @@ Resources:
       GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
       Description: "S3 Endpoints"
 
-  ComputeNoteOutboundVpcEndpointHttp:
+  ComputeNodeOutboundVpcEndpointHttp:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1730,7 +2028,7 @@ Resources:
       GroupId: !GetAtt ComputeNodeSecurityGroup.GroupId
       Description: VpcEndpoint
 
-  ComputeNoteOutboundVpcEndpointHttps:
+  ComputeNodeOutboundVpcEndpointHttps:
     Type: AWS::EC2::SecurityGroupEgress
     Properties:
       IpProtocol: tcp
@@ -1799,17 +2097,8 @@ Resources:
       GroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
       Description: "Client PrefixList"
 
-  LoadBalancerInboundRuleAllowSchedulerIPHTTPS:
-    Type: AWS::EC2::SecurityGroupIngress
-    Properties:
-      IpProtocol: tcp
-      FromPort: 443
-      ToPort: 443
-      CidrIp: !Join [ "", [ !Ref SchedulerPublicIP, "/32" ] ]
-      GroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
-      Description: "Scheduler Public IP - Allow HTTPS traffic to validate DCV sessions"
-
   LoadBalancerInboundRuleAllowNATIPHTTPS:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -1819,7 +2108,20 @@ Resources:
       GroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
       Description: "NAT IP - Allow HTTPS traffic from Compute Nodes to ELB"
 
+  # In a private VPC the connection is directly from the Scheduler
+  LoadBalancerIngressSchedulerHTTPS:
+    Condition: PrivateVpc
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      SourceSecurityGroupId: !GetAtt SchedulerSecurityGroup.GroupId
+      GroupId: !GetAtt LoadBalancerSecurityGroup.GroupId
+      Description: "Scheduler"
+
   LoadBalancerInboundRuleAllowProxyHTTPS:
+    Condition: PublicVpc
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       IpProtocol: tcp
@@ -2075,6 +2377,7 @@ Resources:
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::ec2-linux-nvidia-drivers"] ]
                   - !Sub "arn:${AWS::Partition}:s3:::amazoncloudwatch-agent-${AWS::Region}"
                   - !Sub "arn:${AWS::Partition}:s3:::amazoncloudwatch-agent-${AWS::Region}/*"
+                  - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}", !Ref 'AWS::NoValue' ]
                   - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}/${RepositoryFolder}/*", !Ref 'AWS::NoValue' ]
 
               - Effect: Allow
@@ -2092,6 +2395,7 @@ Resources:
 
               - Effect: Allow
                 Action:
+                  - ec2:DescribeInstances
                   - ec2:DescribeVolumes
                   - ec2:DescribeNetworkInterfaces
                   - fsx:CreateDataRepositoryTask
@@ -2100,6 +2404,12 @@ Resources:
                   - tag:GetTagValues # For FSX detection
                   - tag:GetTagKeys # For FSX detection
                 Resource: "*"
+
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProxyCACertParameterName}"
 
   ComputeNodeInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -2186,6 +2496,7 @@ Resources:
                 Resource:
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket , "/*" ] ]
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket] ]
+                  - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}", !Ref 'AWS::NoValue' ]
                   - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}/${RepositoryFolder}/*", !Ref 'AWS::NoValue' ]
 
               - Effect: Allow
@@ -2211,7 +2522,16 @@ Resources:
                   - ssm:GetParameter
                   - ssm:PutParameter
                 Resource:
-                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ClusterId}/proxy/cacert"
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProxyCACertParameterName}"
+
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref ErrorSnsTopicArn
+                Condition:
+                  "ForAllValues:ArnEqualsIfExists":
+                      "ec2:Vpc": !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:*:vpc/${VpcId}"
 
   ProxyIAMInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -2327,7 +2647,7 @@ Resources:
                 Resource: "*"
                 Condition:
                   "ForAllValues:StringEquals":
-                    "cloudformation:TemplateURL": !Sub "https://s3.{AWS::URLSuffix}/${S3InstallBucket}/${S3InstallFolder}/templates/ComputeNode.template"
+                    "cloudformation:TemplateURL": !Sub "https://s3.${AWS::URLSuffix}/${S3InstallBucket}/${S3InstallFolder}/templates/ComputeNode.template"
 
               - Effect: Allow
                 Action:
@@ -2428,6 +2748,14 @@ Resources:
                 Action:
                   - s3:GetObject
                   - s3:ListBucket
+                Resource:
+                  - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket , "/*" ] ]
+                  - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket] ]
+                  - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}", !Ref 'AWS::NoValue' ]
+                  - !If [ HasRepository, !Sub "arn:${AWS::Partition}:s3:::${RepositoryBucket}/${RepositoryFolder}/*", !Ref 'AWS::NoValue' ]
+
+              - Effect: Allow
+                Action:
                   - s3:PutObject
                 Resource:
                   - !Join [ "", [ "arn:", !Ref "AWS::Partition", ":s3:::", !Ref S3InstallBucket , "/*" ] ]
@@ -2440,6 +2768,21 @@ Resources:
                 Resource:
                   - !GetAtt ComputeNodeIAMRole.Arn
                   - !GetAtt SpotFleetIAMRole.Arn
+                Condition:
+                  "ForAllValues:ArnEqualsIfExists":
+                      "ec2:Vpc": !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:*:vpc/${VpcId}"
+
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${ProxyCACertParameterName}"
+
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref ErrorSnsTopicArn
                 Condition:
                   "ForAllValues:ArnEqualsIfExists":
                       "ec2:Vpc": !Sub "arn:${AWS::Partition}:ec2:${AWS::Region}:*:vpc/${VpcId}"
@@ -2530,6 +2873,13 @@ Resources:
                   - acm:AddTagsToCertificate
                 Resource: "*"
 
+  ESServiceLinkedRole:
+    Type: AWS::IAM::ServiceLinkedRole
+    Condition: CreateESServiceRoleCondition
+    Properties:
+      AWSServiceName: es.amazonaws.com
+      Description: 'ES Role to access resources in SOCA VPC'
+
   #============================================================================
   # GuardDuty
   #============================================================================
@@ -2578,6 +2928,8 @@ Resources:
                   - guardduty:CreateDetector
                   - guardduty:GetDetector
                   - guardduty:ListDetectors
+                  - guardduty:TagResource
+                  - iam:CreateServiceLinkedRole
                 Resource:
                   - '*'
 
@@ -2601,7 +2953,7 @@ Resources:
           import logging
           import re
           '''
-          Get prefix list id
+          Create GuardDuty detector if not already created and return Id.
           '''
           logging.getLogger().setLevel(logging.INFO)
           def lambda_handler(event, context):
@@ -2611,6 +2963,7 @@ Resources:
               if requestType == 'Delete':
                 cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, '')
               
+              clusterId = event['ResourceProperties']['ClusterId']
               guardduty_client = boto3.client('guardduty')
               detectorIds = guardduty_client.list_detectors()['DetectorIds']
               if detectorIds:
@@ -2631,7 +2984,8 @@ Resources:
                           return
               else:
                   logging.info("No detectors found. Creating new GuardDuty detector.")
-                  detectorId = guardduty_client.create_detector(Enable=True, DataSources={'S3Logs': {'Enable': True}}, Tags={'soca:ClusterId': ClusterId})['DetectorId']
+                  response = guardduty_client.create_detector(Enable=True, DataSources={'S3Logs': {'Enable': True}}, Tags={'soca:ClusterId': clusterId})
+                  detectorId = response['DetectorId']
 
               cfnresponse.send(event, context, cfnresponse.SUCCESS, {'Id': detectorId}, str(detectorId))
             except:
@@ -2671,21 +3025,27 @@ Outputs:
     Value: !Ref ComputeNodeInstanceProfile
   ComputeNodeInstanceProfileArn:
     Value: !GetAtt ComputeNodeInstanceProfile.Arn
-  ImageBuilderSecurityGroup:
-    Value: !GetAtt ImageBuilderSecurityGroup.GroupId
   LoadBalancerSecurityGroup:
     Value: !GetAtt LoadBalancerSecurityGroup.GroupId
   SchedulerSecurityGroup:
     Value: !GetAtt SchedulerSecurityGroup.GroupId
   ComputeNodeSecurityGroup:
     Value: !GetAtt ComputeNodeSecurityGroup.GroupId
+  ElasticSearchSecurityGroup:
+    Value: !GetAtt ElasticSearchSecurityGroup.GroupId
+  VpcEndpointSecurityGroup:
+    Value: !GetAtt VpcEndpointSecurityGroup.GroupId
   LambdaACMIAMRoleArn:
     Value: !GetAtt LambdaACMIAMRole.Arn
   BastionDnsName:
+    Condition: PublicVpc
     Value: !GetAtt BastionNLB.DNSName
   ProxyPrivateDnsName:
-    Value: !Sub "proxy.${SocaDomain}"
+    Condition: PublicVpc
+    Value: !Sub "proxy.${SocaLocalDomain}"
   NoProxy:
     Value: !Ref NoProxy
-  ProxyCACertParameter:
-    Value: !Sub "/${ClusterId}/proxy/cacert"
+  ProxyCACertParameterName:
+    Value: !Ref ProxyCACertParameterName
+  GetELBPrivateIPLambdaArn:
+    Value: !GetAtt GetELBPrivateIPLambda.Arn

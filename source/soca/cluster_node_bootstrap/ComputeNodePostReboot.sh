@@ -12,14 +12,16 @@ function info {
 }
 
 function error {
-    echo "$(date):INFO: $1"
+    echo "$(date):ERROR: $1"
 }
 
 info "Starting $0"
 
 source /etc/environment
 source /root/config.cfg
-source /etc/profile.d/proxy.sh
+if [ -e /etc/profile.d/proxy.sh ]; then
+    source /etc/profile.d/proxy.sh
+fi
 
 export PATH=$PATH:/usr/local/bin
 
@@ -34,16 +36,18 @@ echo "SOCA > BEGIN PostReboot setup"
 # In case AMI already have PBS installed, force it to stop
 service pbs stop
 systemctl stop pbs
-crontab -r
+crontab -r || true
+
+# Make sure scripts are executable
+chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/*.sh
 
 # Begin DCV Customization
 if [[ "$SOCA_JOB_TYPE" == "dcv" ]]; then
     echo "Installing DCV"
-    chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeInstallDCV.sh
     /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeInstallDCV.sh >> $SOCA_HOST_SYSTEM_LOG/ComputeNodeInstallDCV.log 2>&1
-    chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeStartDCV.sh
+    info "DCV installed"
     /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeStartDCV.sh   >> $SOCA_HOST_SYSTEM_LOG/ComputeNodeStartDCV.log 2>&1
-    echo "DCV installed"
+    info "DCV started"
     if [[ $? -eq 3 ]];
      then
        REQUIRE_REBOOT=1
@@ -105,7 +109,11 @@ if [[ "$SOCA_FSX_LUSTRE_BUCKET" != 'false' ]] || [[ "$SOCA_FSX_LUSTRE_DNS" != 'f
 
         if [[ "$CHECK_FSX_STATUS" == "AVAILABLE" ]]; then
             echo "FSx is AVAILABLE"
-            echo "$FSX_DNS@tcp:/$GET_FSX_MOUNT_NAME $FSX_MOUNTPOINT lustre defaults,noatime,flock,_netdev 0 0" >> /etc/fstab
+            if ! grep "$FSX_DNS@tcp:/$GET_FSX_MOUNT_NAME $FSX_MOUNTPOINT lustre " /etc/fstab; then
+                echo "$FSX_MOUNTPOINT not found in /etc/fstab"
+                echo "$FSX_DNS@tcp:/$GET_FSX_MOUNT_NAME $FSX_MOUNTPOINT lustre defaults,noatime,flock,_netdev 0 0" >> /etc/fstab
+                mount $FSX_MOUNTPOINT
+            fi
         else
             echo "FSx is not available even after 10 minutes timeout, ignoring FSx mount ..."
         fi
@@ -114,7 +122,11 @@ if [[ "$SOCA_FSX_LUSTRE_BUCKET" != 'false' ]] || [[ "$SOCA_FSX_LUSTRE_DNS" != 'f
         echo "Detected existing FSx provided by customers " $SOCA_FSX_LUSTRE_DNS
         FSX_ID=$(echo $SOCA_FSX_LUSTRE_DNS | cut -d. -f1)
         GET_FSX_MOUNT_NAME=$($AWS fsx describe-file-systems --file-system-ids $FSX_ID  --query FileSystems[].LustreConfiguration.MountName --output text)
-        echo "$SOCA_FSX_LUSTRE_DNS@tcp:/$GET_FSX_MOUNT_NAME $FSX_MOUNTPOINT lustre defaults,noatime,flock,_netdev 0 0" >> /etc/fstab
+        if ! grep "$SOCA_FSX_LUSTRE_DNS@tcp:/$GET_FSX_MOUNT_NAME $FSX_MOUNTPOINT lustre" /etc/fstab; then
+            echo "$SOCA_FSX_LUSTRE_DNS@tcp:/$GET_FSX_MOUNT_NAME $FSX_MOUNTPOINT not found in /etc/fstab"
+            echo "$SOCA_FSX_LUSTRE_DNS@tcp:/$GET_FSX_MOUNT_NAME $FSX_MOUNTPOINT lustre defaults,noatime,flock,_netdev 0 0" >> /etc/fstab
+            mount $FSX_MOUNTPOINT
+        fi
     fi
 
     # Install FSx for Lustre Client
@@ -221,8 +233,6 @@ while [ ! -d \$SOCA_HOST_SYSTEM_LOG ]
 do
     sleep 1
 done
-chmod +x /apps/soca/\$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeUserCustomization.sh
-chmod +x /apps/soca/\$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeConfigureMetrics.sh 
 /apps/soca/\$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeUserCustomization.sh >> \$SOCA_HOST_SYSTEM_LOG/ComputeNodeUserCustomization.log 2>&1
 /apps/soca/\$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeConfigureMetrics.sh >> \$SOCA_HOST_SYSTEM_LOG/ComputeNodeConfigureMetrics.log 2>&1
 systemctl start pbs" >> /etc/rc.local
@@ -231,9 +241,6 @@ systemctl start pbs" >> /etc/rc.local
     reboot
     # End USER Customization
 else
-    # Mount
-    mount -a
-
     # Make Scratch (and /fsx if applicable) R/W by everyone. ACL still applies at folder level
     echo "chmod /scratch"
     chmod 777 /scratch
@@ -254,12 +261,10 @@ else
     fi
 
     # Begin USER Customization
-    chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeUserCustomization.sh 
     /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeUserCustomization.sh >> $SOCA_HOST_SYSTEM_LOG/ComputeNodeUserCustomization.log 2>&1
     # End USER Customization
 
     # Begin Metric Customization
-    chmod +x /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeConfigureMetrics.sh
     /apps/soca/$SOCA_CONFIGURATION/cluster_node_bootstrap/ComputeNodeConfigureMetrics.sh >> $SOCA_HOST_SYSTEM_LOG/ComputeNodeConfigureMetrics.log 2>&1
     # End Metric Customization
 
@@ -267,3 +272,4 @@ else
     systemctl start pbs
 fi
 
+rm -f /root/patch-hold

@@ -25,14 +25,18 @@
 - name: Install epel
   include_tasks: install-epel.yml
 
-- name: Install packages for cloudwatch agent
+- name: Install collectd on Amazon Linux
+  when: ansible_facts['distribution'] == 'Amazon'
+  shell:
+    cmd: amazon-linux-extras install -y collectd
+
+- name: Install collectd
   yum:
     state: present
     enablerepo: epel
     update_cache: yes
     name:
       - collectd
-      - statsd
 
 - name: Create /root/cw-agent-config
   file:

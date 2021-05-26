@@ -3,8 +3,11 @@
 
 - name: Install security updates
   yum:
+    bugfix: yes
     security: yes
     state: latest
+    update_cache: yes
+    name: '*'
 
 - name: Create /root/bin
   file:

@@ -17,7 +17,7 @@ cat <<EOF >>/tmp/route53.json
         {
             "Action": "UPSERT",
             "ResourceRecordSet": {
-                "Name": "proxy.${SOCA_DOMAIN}",
+                "Name": "proxy.${SOCA_LOCAL_DOMAIN}",
                 "Type": "A",
                 "TTL": 60,
                 "ResourceRecords": [{"Value": "${SERVER_IP}"}]

@@ -71,6 +71,7 @@ def create_home(username):
         shutil.copy('/etc/skel/.bashrc', user_path[:-4])
         shutil.copy('/etc/skel/.bash_profile', user_path[:-4])
         shutil.copy('/etc/skel/.bash_logout', user_path[:-4])
+        shutil.chown(user_home + '/' + username, user=username, group=username)
         shutil.chown(user_home + '/' + username + '/.bashrc', user=username, group=username)
         shutil.chown(user_home + '/' + username + '/.bash_profile', user=username, group=username)
         shutil.chown(user_home + '/' + username + '/.bash_logout', user=username, group=username)
